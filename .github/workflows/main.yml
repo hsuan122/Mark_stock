@@ -23,7 +23,7 @@ jobs:
 
       - name: 3. 安裝最新套件
         run: |
-          pip install -U yfinance pandas numpy requests
+          pip install -U yfinance pandas numpy requests lxml html5lib
 
       - name: 4. 執行 7 大指標選股並推播 Telegram
         env:
