@@ -130,20 +130,23 @@ def send_telegram_msg(message):
     except Exception as e:
         print(f"❌ 網路連線錯誤：{e}")
 
-def send_minervini_reports(breakouts, pivot_ready, stage2_leaders, total_scanned, template_passed, clean_passed):
+def send_minervini_reports(breakouts, pivot_ready, shakeout_pocket, tennis_rebound, total_scanned, template_passed, clean_passed):
     all_blocks = []
     if breakouts:
-        all_blocks.append("🚀 <b>【一、今日正式突破精準樞紐點 (Pivot Breakout)】</b>\n<i>(右側窄幅橫盤完成 + 今日首根帶量紅K突破樞紐買點)</i>")
+        all_blocks.append("🚀 <b>【一、今日正式突破樞紐買點 (Pivot Breakout)】</b>\n<i>(右側收斂完成 + 今日帶量紅K突破樞紐，標準進場訊號)</i>")
         all_blocks.extend(breakouts)
     if pivot_ready:
-        all_blocks.append("\n🎯 <b>【二、精準樞紐點成型・隨時突破池 (Pivot Forming)】</b>\n<i>(穩守均線之上、完成VCP右側量縮窄幅收斂，距樞紐買點極近)</i>")
+        all_blocks.append("\n🎯 <b>【二、緊貼樞紐點・隨時突破池 (如視陽高檔收斂)】</b>\n<i>(穩守均線之上、量縮窄幅整理，距樞紐買點極近，隔日盯盤首選)</i>")
         all_blocks.extend(pivot_ready)
-    if stage2_leaders:
-        all_blocks.append("\n📋 <b>【三、Mark 模板乾淨籌碼觀察池 (依收斂度排序)】</b>\n<i>(通過漲量多跌量縮、無爆量綠K，正在構築右側底部)</i>")
-        all_blocks.extend(stage2_leaders)
+    if shakeout_pocket:
+        all_blocks.append("\n🪝 <b>【三、20MA 量縮洗盤下影線／口袋支點 (如視陽11/04)】</b>\n<i>(回測月線量縮收長下影線或小紅K守穩，突破前夕的早期低接點)</i>")
+        all_blocks.extend(shakeout_pocket)
+    if tennis_rebound:
+        all_blocks.append("\n🎾 <b>【四、強勢網球反彈・等右肩收斂觀察池 (如碩天V轉)】</b>\n<i>(洗盤後強勢彈回均線，短線勿追高，列入觀察等右肩量縮橫盤再出手)</i>")
+        all_blocks.extend(tennis_rebound)
 
     if not all_blocks:
-        send_telegram_msg(f"📊 <b>【Mark Minervini 樞紐點雷達 V8】</b>\n掃描 {total_scanned} 檔，過模板 {template_passed} 檔。")
+        send_telegram_msg(f"📊 <b>【Mark Minervini 樞紐點雷達 V9】</b>\n掃描 {total_scanned} 檔，過模板 {template_passed} 檔。")
         return
 
     chunk_size = 7
@@ -152,13 +155,13 @@ def send_minervini_reports(breakouts, pivot_ready, stage2_leaders, total_scanned
         page = (i // chunk_size) + 1
         chunk = all_blocks[i:i + chunk_size]
         header = (
-            f"📊 <b>【Mark 精準樞紐點日報 V8】({page}/{total_pages})</b>\n"
-            f"<i>掃描 {total_scanned} 檔｜過模板 {template_passed} 檔｜乾淨圖形 {clean_passed} 檔</i>\n\n"
+            f"📊 <b>【Mark 樞紐點四大分流日報 V9】({page}/{total_pages})</b>\n"
+            f"<i>掃描 {total_scanned} 檔｜過模板 {template_passed} 檔｜無綠K天量好圖 {clean_passed} 檔</i>\n\n"
         )
         send_telegram_msg(header + "\n\n".join(chunk))
 
 # ==========================================
-# 5. 主角：Mark Minervini + 右側精準樞紐點 (Exact Pivot) 識別引擎
+# 5. 主角：Mark Minervini 四大實戰情境分流引擎
 # ==========================================
 def analyze_market_minervini(stock_dict):
     symbols = list(stock_dict.keys())
@@ -208,7 +211,8 @@ def analyze_market_minervini(stock_dict):
 
     breakout_candidates = []
     pivot_ready_candidates = []
-    clean_stage2_pool = []
+    shakeout_candidates = []
+    tennis_rebound_candidates = []
     template_passed_count = 0
     clean_passed_count = 0
 
@@ -225,12 +229,13 @@ def analyze_market_minervini(stock_dict):
         name = stock_dict.get(symbol, symbol)
         is_tw = symbol.endswith(".TW") or symbol.endswith(".TWO")
 
+        ma10 = close.rolling(10).mean()
         ma20 = close.rolling(20).mean()
         ma50 = close.rolling(50).mean()
         ma150 = close.rolling(150).mean()
         ma200 = close.rolling(200).mean()
+        vol_ma10 = vol.rolling(10).mean()
         vol_ma20 = vol.rolling(20).mean()
-        vol_ma50 = vol.rolling(50).mean()
 
         if vol_ma20.iloc[-1] < 250000:
             continue
@@ -259,25 +264,16 @@ def analyze_market_minervini(stock_dict):
         doubled_from_low = (c_now >= low_52w * 2.0)
 
         # ====================================================
-        # 🛡️ 【第二關】醜圖與破線深V急拉封殺令 (含碩天 11/09 一字漲停過濾)
+        # 🛡️ 【第二關】真出貨醜圖封殺令 (只砍大甲、寶雅、中鼎、藥華藥，絕不誤砍碩天、視陽！)
         # ====================================================
-        # 1. 近半年最大回檔不得超過 32%
+        # 1. 近半年最大回檔不得超過 32% (淘汰大甲跌 42%)
         peak_6m_pos = high.iloc[-126:].values.argmax()
         peak_6m = high.iloc[-126:].max()
         low_after_peak = low.iloc[-126 + peak_6m_pos:].min()
         if ((peak_6m - low_after_peak) / peak_6m) > 0.32:
             continue
 
-        # 2. 排除「一字漲停/跌停鎖死 (High == Low)」造成的失真訊號 (如碩天 11/09 開高低收皆 234 量 74張)
-        has_locked_limit_bar = (high.iloc[-5:] == low.iloc[-5:]).any()
-        if has_locked_limit_bar:
-            continue
-
-        # 3. 排除「剛從 50MA 季線底下深 V 急拉上來」的假樞紐：過去 5 個交易日收盤價必須穩守在 50MA 的 98.5% 以上
-        if (close.iloc[-6:-1] < ma50.iloc[-6:-1] * 0.985).any():
-            continue
-
-        # 4. 封殺綠 K 天量與爆量長黑出貨
+        # 2. 封殺過去 60 天最大量前 2 名為綠K/黑K (淘汰寶雅 8.4萬張綠K、中鼎 2.29萬張綠K)
         is_black_candle = close < open_p
         is_ugly_green_vol = (close < open_p * 0.992) | (close < close.shift(1) * 0.985)
         is_red_candle = (close >= open_p) & (close >= close.shift(1))
@@ -286,15 +282,18 @@ def analyze_market_minervini(stock_dict):
         if (is_black_candle.loc[top2_vol_dates] | (close.loc[top2_vol_dates] < close.shift(1).loc[top2_vol_dates])).any():
             continue
 
-        vol_spike_2x = vol.iloc[-30:] >= (vol_ma20.iloc[-30:] * 2.0)
-        wick_dump = ((high.iloc[-15:] - close.iloc[-15:]) / high.iloc[-15:] > 0.045) & (vol.iloc[-15:] >= vol_ma20.iloc[-15:] * 1.6)
-        if (is_ugly_green_vol.iloc[-30:] & vol_spike_2x).any() or wick_dump.any():
+        # 3. 封殺過去 25 天出現 >= 2.1 倍均量的大綠K 或 1.8倍量長上影線出貨 (淘汰佳大)
+        vol_spike_2x = vol.iloc[-25:] >= (vol_ma20.iloc[-25:] * 2.1)
+        wick_dump = ((high.iloc[-12:] - close.iloc[-12:]) / high.iloc[-12:] > 0.05) & (vol.iloc[-12:] >= vol_ma20.iloc[-12:] * 1.8)
+        if (is_ugly_green_vol.iloc[-25:] & vol_spike_2x).any() or wick_dump.any():
             continue
 
+        # 4. 今日不得為帶量長黑下跌 (淘汰藥華藥 11/10)
         vol_ratio_today = vol.iloc[-1] / vol_ma20.iloc[-2] if vol_ma20.iloc[-2] > 0 else 1.0
-        if ((c_now < o_now) or (c_now < c_prev)) and (vol_ratio_today >= 1.2):
+        if ((c_now < o_now * 0.99) or (c_now < c_prev * 0.99)) and (vol_ratio_today >= 1.25):
             continue
 
+        # 5. 漲量多、跌量縮
         red_v25 = vol.iloc[-25:][is_red_candle.iloc[-25:]]
         green_v25 = vol.iloc[-25:][is_black_candle.iloc[-25:]]
         avg_red_v = red_v25.mean() if len(red_v25) > 0 else 0
@@ -302,50 +301,37 @@ def analyze_market_minervini(stock_dict):
         vol_5d_avg = vol.iloc[-6:-1].mean()
         vol_shrink_ratio = vol_5d_avg / vol_ma20.iloc[-2] if vol_ma20.iloc[-2] > 0 else 1.0
 
-        if (avg_red_v < avg_green_v * 0.95) and (vol_shrink_ratio > 0.75):
-            continue
-
-        # ====================================================
-        # 🎯 【第三關】精準樞紐點 (Exact Pivot Point) 幾何定位演算法
-        # ====================================================
-        # A. 基底前波大高點 (Base High：過去 20~60 天整理期的最高峰，如碩天的 276.5)
-        base_high = high.iloc[-60:-1].max()
-        
-        # B. 右側收斂小高點 = 精準樞紐買點 (Tight Pivot High：過去 6~12 天窄幅橫盤區的上緣最高點)
-        tight_pivot_high = high.iloc[-11:-1].max()
-        tight_pivot_low = low.iloc[-11:-1].min()
-        tight_10d_range = (tight_pivot_high - tight_pivot_low) / tight_pivot_high
-
-        # 決定採用哪一個作為實戰樞紐點：
-        # 如果近 10 天已經在右側高檔形成窄幅箱型 (振幅 <= 9% 且距離大高點 12% 以內)，該小箱型上緣就是最精準的「右側樞紐買點」！
-        if (tight_10d_range <= 0.09) and (tight_pivot_high >= base_high * 0.88):
-            exact_pivot = tight_pivot_high
-            pivot_type_str = f"右側小箱頂 <b>{exact_pivot:.2f}</b> (大前高 {base_high:.2f})"
-        else:
-            exact_pivot = high.iloc[-21:-1].max()
-            pivot_type_str = f"前波高點 <b>{exact_pivot:.2f}</b>"
-
-        dist_from_pivot = (c_now - exact_pivot) / exact_pivot
-        # 若已突破樞紐點超過 +5.5% (或近 3 天已暴漲超過 12%，如碩天連拉兩根)，視為已噴出過遠不追高！
-        gain_3d = (c_now - close.iloc[-4]) / close.iloc[-4]
-        if dist_from_pivot > 0.055 or dist_from_pivot < -0.15 or gain_3d > 0.12:
+        if (avg_red_v < avg_green_v * 0.90) and (vol_shrink_ratio > 0.80):
             continue
 
         clean_passed_count += 1
 
-        # 計算基底 45 日 vs 近 15 日 vs 近 5 日波幅收縮
+        # ====================================================
+        # 🎯 【第三關】計算樞紐點與波動收縮指標
+        # ====================================================
+        base_high = high.iloc[-60:-1].max()
+        tight_pivot_high = high.iloc[-11:-1].max()
+        tight_pivot_low = low.iloc[-11:-1].min()
+        tight_10d_range = (tight_pivot_high - tight_pivot_low) / tight_pivot_high
+
+        # 若近 10 日已在高檔形成窄幅箱型 (振幅 <= 9.5% 且距前波大高點 12% 內)，取小箱頂為精準樞紐；否則取前波高點 (如視陽 292.00、碩天 276.50)
+        if (tight_10d_range <= 0.095) and (tight_pivot_high >= base_high * 0.88):
+            exact_pivot = tight_pivot_high
+            pivot_type_str = f"右側樞紐 <b>{exact_pivot:.2f}</b> (大前高 {base_high:.2f})"
+        else:
+            exact_pivot = high.iloc[-25:-1].max()
+            pivot_type_str = f"前高樞紐 <b>{exact_pivot:.2f}</b>"
+
+        dist_from_pivot = (c_now - exact_pivot) / exact_pivot
+        # 若已突破前高超過 +8% 以上 (如騰雲)，代表早已脫離底部與右肩，予以排除
+        if dist_from_pivot > 0.08 or dist_from_pivot < -0.18:
+            continue
+
         base_45d_drop = abs((low.iloc[-46:-1].min() / high.iloc[-46:-1].max()) - 1)
         recent_15d_drop = abs((low.iloc[-16:-1].min() / high.iloc[-16:-1].max()) - 1)
         recent_5d_drop = abs((low.iloc[-6:-1].min() / high.iloc[-6:-1].max()) - 1)
 
-        # 標準右側樞紐成型條件：近 10 日波幅 <= 8.5% (或近 5 日 <= 5.5%)，且明顯小於 45 日基底波幅，且站在 20MA 之上
-        is_pivot_forming = (
-            (recent_15d_drop <= base_45d_drop * 0.75 or recent_5d_drop <= base_45d_drop * 0.55) and
-            (recent_5d_drop <= 0.075) and
-            (c_now >= ma20.iloc[-1] * 0.985)
-        )
-
-        # 計算 2x ATR 停損價 (最大 10%，若為緊密樞紐則參考右側箱底與 2xATR)
+        # 計算 2x ATR 停損價 (最大 10%)
         tr = pd.concat([high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1).max(axis=1)
         atr20 = tr.rolling(20).mean().iloc[-1]
         stop_distance = min(2 * atr20, c_now * 0.10)
@@ -384,37 +370,78 @@ def analyze_market_minervini(stock_dict):
         vcp_str = f"基底-{base_45d_drop*100:.1f}% ➔ 近15日-{recent_15d_drop*100:.1f}% ➔ 近5日-{recent_5d_drop*100:.1f}%"
         support_str = " | ".join(supporting_tags)
 
+        # ====================================================
+        # 👑 【第四關】四大實戰情境分流 (視陽 & 碩天全部精準入列！)
+        # ====================================================
+        # 檢查過去 6 天是否曾跌破 50MA 或 20MA 後強勢深 V 彈回 (如碩天從 213 急彈回 257)
+        dipped_below_ma_recently = (low.iloc[-7:-1] < ma50.iloc[-7:-1] * 0.99).any()
+        gain_3d = (c_now - close.iloc[-4]) / close.iloc[-4]
+        has_locked_bar = (high.iloc[-5:] == low.iloc[-5:]).any()
         is_strong_red_today = (c_now > o_now) and (c_now > c_prev) and ((c_now - l_now) >= (h_now - l_now) * 0.55 if h_now > l_now else True)
 
-        # 分類 1：🚀 今日正式突破精準樞紐點 (前幾日已收斂，今日第一根帶量紅K突破 exact_pivot)
-        if is_pivot_forming and is_strong_red_today and (c_now > exact_pivot) and (c_prev <= exact_pivot) and (vol_ratio_today >= 1.3):
+        # 檢查是否為「視陽 11/04 型態」：回測 20MA 洗盤拉出下影線 (Shakeout) 且量縮守穩 20MA！
+        lower_wick_len = min(o_now, c_now) - l_now
+        candle_range = h_now - l_now if h_now > l_now else 0.01
+        is_20ma_shakeout = (
+            (l_now <= ma20.iloc[-1] * 1.015) and             # 盤中最低點回測或微破 20MA (如視陽11/04最低249破20MA 253.3)
+            (c_now >= ma20.iloc[-1] * 0.995) and             # 收盤卻強勢拉回守穩 20MA 之上 (如視陽收258)
+            ((lower_wick_len / candle_range >= 0.35) or (c_now >= o_now)) and # 留明顯下影線T字棒或收紅K
+            (vol.iloc[-1] <= vol_ma10.iloc[-1] * 1.05)       # 當日成交量萎縮 (如視陽397張 < 10日均量512張)
+        )
+
+        # 標準右側橫盤成型條件 (未曾跌破季線深V、近 5 日波幅收斂 <= 7.5%、穩守 20MA 之上)
+        is_tight_right_side = (
+            (not dipped_below_ma_recently) and
+            (not has_locked_bar) and
+            (recent_5d_drop <= 0.075) and
+            (c_now >= ma20.iloc[-1] * 0.985)
+        )
+
+        # ----------------------------------------------------
+        # 分類 1：🚀 今日正式突破樞紐買點 (如視陽 11/05 帶量紅K突破前高)
+        # ----------------------------------------------------
+        if is_tight_right_side and is_strong_red_today and (c_now > exact_pivot) and (c_prev <= exact_pivot) and (vol_ratio_today >= 1.3):
             score = rs_rating + (20 if doubled_from_low else 0) + int(vol_ratio_today * 5)
             breakout_candidates.append((score, symbol, title, c_now, rs_rating, vol_ratio_today, pivot_type_str, vcp_str, support_str, stop_price, stop_pct))
 
-        # 分類 2：🎯 精準樞紐點成型・隨時突破池 (已量縮收斂，且收盤價距離精準樞紐點僅差 0% ~ 4% 內！)
-        elif is_pivot_forming and (vol_shrink_ratio <= 0.85) and (c_now <= exact_pivot) and (dist_from_pivot >= -0.045):
+        # ----------------------------------------------------
+        # 分類 2：🎯 緊貼樞紐點・隨時突破池 (如視陽目前 288.00 緊貼 292.00 樞紐高點！)
+        # ----------------------------------------------------
+        elif is_tight_right_side and (c_now <= exact_pivot) and (dist_from_pivot >= -0.05):
             dist_pct = abs(dist_from_pivot) * 100
             score = rs_rating + int((1 - recent_5d_drop) * 40) + int((0.05 - abs(dist_from_pivot)) * 200)
             pivot_ready_candidates.append((score, symbol, title, c_now, rs_rating, vol_shrink_ratio * 100, pivot_type_str, dist_pct, vcp_str, support_str, stop_price, stop_pct))
 
-        # 分類 3：📋 模板乾淨籌碼觀察池 (其餘通過封殺令的好圖，依近 5 日波幅最窄排序)
-        else:
+        # ----------------------------------------------------
+        # 分類 3：🪝 20MA 量縮洗盤下影線／口袋支點 (專門捕捉視陽 11/04 那根神級洗盤買點！)
+        # ----------------------------------------------------
+        elif is_20ma_shakeout and (not dipped_below_ma_recently):
             dist_pct = abs(dist_from_pivot) * 100
-            tightness_score = int((1 - recent_5d_drop) * 100) + rs_rating
-            clean_stage2_pool.append((tightness_score, symbol, title, c_now, rs_rating, vol_shrink_ratio * 100, pivot_type_str, dist_pct, vcp_str, support_str, stop_price, stop_pct))
+            score = rs_rating + (15 if doubled_from_low else 0) + int((1 - vol_ratio_today) * 20)
+            shakeout_candidates.append((score, symbol, title, c_now, rs_rating, ma20.iloc[-1], pivot_type_str, dist_pct, vcp_str, support_str, stop_price, stop_pct))
+
+        # ----------------------------------------------------
+        # 分類 4：🎾 強勢網球反彈・等右肩觀察池 (專門保留碩天 257.00 這種深V強彈股，不誤刪！)
+        # ----------------------------------------------------
+        elif dipped_below_ma_recently or (gain_3d >= 0.08) or (c_now >= ma20.iloc[-1] and dist_from_pivot >= -0.10):
+            dist_pct = abs(dist_from_pivot) * 100
+            score = rs_rating + (15 if doubled_from_low else 0) + int((1 - recent_5d_drop) * 20)
+            rebound_tag = "深V強彈回均線之上" if dipped_below_ma_recently else "右肩打底收斂中"
+            tennis_rebound_candidates.append((score, symbol, title, c_now, rs_rating, rebound_tag, pivot_type_str, dist_pct, vcp_str, support_str, stop_price, stop_pct))
 
     breakout_candidates.sort(key=lambda x: x[0], reverse=True)
     pivot_ready_candidates.sort(key=lambda x: x[0], reverse=True)
-    clean_stage2_pool.sort(key=lambda x: x[0], reverse=True)
+    shakeout_candidates.sort(key=lambda x: x[0], reverse=True)
+    tennis_rebound_candidates.sort(key=lambda x: x[0], reverse=True)
 
     print("💰 正在為入選標的查詢最新季報 EPS 數據...")
     final_breakouts = []
-    for item in breakout_candidates[:8]:
+    for item in breakout_candidates[:6]:
         _, sym, title, c_now, rs, v_ratio, piv_str, vcp_s, sup_s, sp, sp_pct = item
         eps_str = get_eps_info(sym)
         final_breakouts.append(
             f"<b>{title}</b> (收盤: {c_now:.2f} | <b>RS: {rs}</b>)\n"
-            f" ├ 🚀 <b>突破樞紐買點</b>：今日紅K帶量({v_ratio:.1f}倍)突破 {piv_str}\n"
+            f" ├ 🚀 <b>突破樞紐買點</b>：紅K帶量({v_ratio:.1f}倍)突破 {piv_str}\n"
             f" ├ 📐 波動收縮：{vcp_s}\n"
             f" ├ 💰 獲利表現：{eps_str}\n"
             f" ├ 💡 價量配角：{sup_s}\n"
@@ -422,35 +449,47 @@ def analyze_market_minervini(stock_dict):
         )
 
     final_pivot_ready = []
-    for item in pivot_ready_candidates[:10]:
+    for item in pivot_ready_candidates[:8]:
         _, sym, title, c_now, rs, v_shrink, piv_str, dist_p, vcp_s, sup_s, sp, sp_pct = item
         eps_str = get_eps_info(sym)
         final_pivot_ready.append(
             f"<b>{title}</b> (收盤: {c_now:.2f} | <b>RS: {rs}</b>)\n"
-            f" ├ 🎯 <b>緊貼樞紐點(差 {dist_p:.1f}% 突破)</b>：{piv_str}｜近5日量縮至 {v_shrink:.0f}%\n"
+            f" ├ 🎯 <b>緊貼樞紐點(差 {dist_p:.1f}% 突破)</b>：{piv_str}｜近5日量 {v_shrink:.0f}%\n"
             f" ├ 📐 波動收縮：{vcp_s}\n"
             f" ├ 💰 獲利表現：{eps_str}\n"
             f" ├ 💡 價量配角：{sup_s}\n"
             f" └ 🛡️ 預估停損：<b>{sp:.2f}</b> (-{sp_pct:.1f}%)"
         )
 
-    final_stage2 = []
-    need_count = max(5, 12 - (len(final_breakouts) + len(final_pivot_ready)))
-    for item in clean_stage2_pool[:need_count]:
-        _, sym, title, c_now, rs, v_shrink, piv_str, dist_p, vcp_s, sup_s, sp, sp_pct = item
+    final_shakeout = []
+    for item in shakeout_candidates[:6]:
+        _, sym, title, c_now, rs, ma20_v, piv_str, dist_p, vcp_s, sup_s, sp, sp_pct = item
         eps_str = get_eps_info(sym)
-        final_stage2.append(
+        final_shakeout.append(
             f"<b>{title}</b> (收盤: {c_now:.2f} | <b>RS: {rs}</b>)\n"
-            f" ├ 📋 <b>右側構築中(距樞紐 {dist_p:.1f}%)</b>：{piv_str}｜近5日量 {v_shrink:.0f}%\n"
+            f" ├ 🪝 <b>20MA量縮洗盤守穩</b>：回測月線({ma20_v:.1f})拉下影線/量縮｜上檔 {piv_str}\n"
+            f" ├ 📐 波動收縮：{vcp_s}\n"
+            f" ├ 💰 獲利表現：{eps_str}\n"
+            f" ├ 💡 價量配角：{sup_s}\n"
+            f" └ 🛡️ 2xATR停損：<b>{sp:.2f}</b> (-{sp_pct:.1f}%)"
+        )
+
+    final_tennis = []
+    for item in tennis_rebound_candidates[:8]:
+        _, sym, title, c_now, rs, reb_tag, piv_str, dist_p, vcp_s, sup_s, sp, sp_pct = item
+        eps_str = get_eps_info(sym)
+        final_tennis.append(
+            f"<b>{title}</b> (收盤: {c_now:.2f} | <b>RS: {rs}</b>)\n"
+            f" ├ 🎾 <b>{reb_tag}(距前高 {dist_p:.1f}%)</b>：觀察等右肩量縮橫盤｜{piv_str}\n"
             f" ├ 📐 波動收縮：{vcp_s}\n"
             f" ├ 💰 獲利表現：{eps_str}\n"
             f" ├ 💡 價量配角：{sup_s}\n"
             f" └ 🛡️ 預估停損：<b>{sp:.2f}</b> (-{sp_pct:.1f}%)"
         )
 
-    return final_breakouts, final_pivot_ready, final_stage2, len(raw_data), template_passed_count, clean_passed_count
+    return final_breakouts, final_pivot_ready, final_shakeout, final_tennis, len(raw_data), template_passed_count, clean_passed_count
 
 if __name__ == "__main__":
     stock_dict = get_full_market_stock_list()
-    breakouts, pivot_ready, stage2_leaders, total_scanned, template_passed, clean_passed = analyze_market_minervini(stock_dict)
-    send_minervini_reports(breakouts, pivot_ready, stage2_leaders, total_scanned, template_passed, clean_passed)
+    breakouts, pivot_ready, shakeout_pocket, tennis_rebound, total_scanned, template_passed, clean_passed = analyze_market_minervini(stock_dict)
+    send_minervini_reports(breakouts, pivot_ready, shakeout_pocket, tennis_rebound, total_scanned, template_passed, clean_passed)
