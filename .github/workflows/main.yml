@@ -1,0 +1,41 @@
+name: Daily Stock Radar
+
+on:
+  schedule:
+    # 台灣時間週一至週五下午 15:00 自動執行 (對應 UTC 時間 07:00)
+    - cron: '0 7 * * 1-5'
+  workflow_dispatch: # 允許手動按按鈕立刻測試
+
+permissions:
+  contents: write # 開放權限讓機器人自動打卡續命，防止 60 天休眠
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 1. 下載專案程式碼
+        uses: actions/checkout@v4
+
+      - name: 2. 安裝 Python 環境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 3. 安裝最新套件
+        run: |
+          pip install -U yfinance pandas numpy requests
+
+      - name: 4. 執行 7 大指標選股並推播 Telegram
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python scanner.py
+
+      - name: 5. 自動打卡防休眠 (解決 GitHub 60 天停用問題)
+        run: |
+          date > last_run.txt
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add last_run.txt
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto keep-alive" && git push)
