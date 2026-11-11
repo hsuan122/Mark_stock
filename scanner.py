@@ -14,73 +14,90 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "請換成你的_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "請換成你的_CHAT_ID")
 
 # ==========================================
-# 2. 全市場股票池抓取 (台股全上市櫃 + 美股 S&P500 / Nasdaq100)
+# 2. 全市場 7,000+ 檔股票池抓取 (台股全上市櫃 + 美股 NYSE/NASDAQ/AMEX 全市場)
 # ==========================================
-def get_full_market_stock_list():
-    stock_dict = {}
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+def get_entire_market_universe():
+    tw_dict = {}
+    us_dict = {}
+    total_raw_count = 0
 
-    # A. 台股【全上市】普通股
+    # A. 台股【全上市】普通股 (TWSE 官方 API)
     try:
         res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", timeout=15)
         if res.status_code == 200:
             twse_df = pd.DataFrame(res.json())
             twse_df = twse_df[twse_df['Code'].str.match(r'^[1-9]\d{3}$')]
+            total_raw_count += len(twse_df)
+            twse_df['ClosingPrice'] = pd.to_numeric(twse_df['ClosingPrice'].str.replace(',', ''), errors='coerce')
             twse_df['TradeVolume'] = pd.to_numeric(twse_df['TradeVolume'].str.replace(',', ''), errors='coerce')
-            valid_twse = twse_df[twse_df['TradeVolume'] >= 100000]
+            # 僅排除日成交量不到 30 張的無流動性殭屍股
+            valid_twse = twse_df[(twse_df['ClosingPrice'] > 0) & (twse_df['TradeVolume'] >= 30000)]
             for _, row in valid_twse.iterrows():
-                stock_dict[f"{row['Code']}.TW"] = row['Name'].strip()
+                tw_dict[f"{row['Code']}.TW"] = row['Name'].strip()
     except Exception as e:
         print(f"⚠️ 上市清單抓取異常: {e}")
 
-    # B. 台股【全上櫃】普通股
+    # B. 台股【全上櫃】普通股 (TPEx 官方 API)
     try:
         res_otc = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes", timeout=15)
         if res_otc.status_code == 200:
             tpex_df = pd.DataFrame(res_otc.json())
             tpex_df = tpex_df[tpex_df['SecuritiesCompanyCode'].str.match(r'^[1-9]\d{3}$')]
+            total_raw_count += len(tpex_df)
+            tpex_df['Close'] = pd.to_numeric(tpex_df['Close'].str.replace(',', ''), errors='coerce')
             tpex_df['TradingShares'] = pd.to_numeric(tpex_df['TradingShares'].str.replace(',', ''), errors='coerce')
-            valid_tpex = tpex_df[tpex_df['TradingShares'] >= 100000]
+            valid_tpex = tpex_df[(tpex_df['Close'] > 0) & (tpex_df['TradingShares'] >= 30000)]
             for _, row in valid_tpex.iterrows():
-                stock_dict[f"{row['SecuritiesCompanyCode']}.TWO"] = row['CompanyName'].strip()
+                tw_dict[f"{row['SecuritiesCompanyCode']}.TWO"] = row['CompanyName'].strip()
     except Exception as e:
         print(f"⚠️ 上櫃清單抓取異常: {e}")
 
-    # C. 美股【S&P 500 + Nasdaq 100 + 熱門動能股】
-    us_tickers = set()
+    # C. 美股【NYSE + NASDAQ + AMEX 全市場約 5,500+ 檔】直接串接 NASDAQ 官方 Screener API
+    nasdaq_headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Origin': 'https://www.nasdaq.com',
+        'Referer': 'https://www.nasdaq.com/'
+    }
     try:
-        sp_res = requests.get("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", headers=headers, timeout=15)
-        if sp_res.status_code == 200:
-            sp_table = pd.read_html(io.StringIO(sp_res.text))[0]
-            for sym in sp_table['Symbol'].tolist():
-                us_tickers.add(str(sym).replace('.', '-').strip())
-    except Exception:
-        pass
+        us_url = "https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=10000&download=true"
+        us_res = requests.get(us_url, headers=nasdaq_headers, timeout=20)
+        if us_res.status_code == 200:
+            rows = us_res.json().get('data', {}).get('rows', [])
+            total_raw_count += len(rows)
+            us_df = pd.DataFrame(rows)
+            # 僅保留純字母普通股代號 (排除特別股 ^、權證 / WS)
+            us_df = us_df[us_df['symbol'].str.match(r'^[A-Z]{1,5}$', na=False)]
+            us_df['price'] = pd.to_numeric(us_df['lastsale'].astype(str).str.replace('$', '').str.replace(',', ''), errors='coerce')
+            us_df['vol'] = pd.to_numeric(us_df['volume'].astype(str).str.replace(',', ''), errors='coerce')
+            us_df['mcap'] = pd.to_numeric(us_df['marketCap'].astype(str).str.replace(',', ''), errors='coerce')
+            us_df['dollar_vol'] = us_df['price'] * us_df['vol']
 
-    try:
-        nq_res = requests.get("https://en.wikipedia.org/wiki/Nasdaq-100", headers=headers, timeout=15)
-        if nq_res.status_code == 200:
-            for tbl in pd.read_html(io.StringIO(nq_res.text)):
-                if 'Ticker' in tbl.columns:
-                    for sym in tbl['Ticker'].tolist():
-                        us_tickers.add(str(sym).replace('.', '-').strip())
-                    break
-    except Exception:
-        pass
+            # 依《超級績效》第5章原則：排除美股低於 $8 的仙股(Penny Stocks)與市值過小的殭屍股，取全美股日成交金額前 1,600 大活躍股進入深度K線運算
+            active_us = us_df[(us_df['price'] >= 8.0) & (us_df['mcap'] >= 150_000_000) & (us_df['vol'] >= 100_000)]
+            active_us = active_us.sort_values(by='dollar_vol', ascending=False).head(1600)
+            for _, row in active_us.iterrows():
+                sym = str(row['symbol']).strip()
+                us_dict[sym] = sym
+    except Exception as e:
+        print(f"⚠️ NASDAQ 全市場 API 異常，切換為備援清單: {e}")
 
-    extra_us = [
-        "NVDA", "AAPL", "MSFT", "AMZN", "META", "GOOGL", "TSLA", "AVGO", "AMD", "PLTR",
-        "NFLX", "CRM", "PANW", "CRWD", "NOW", "ANET", "MU", "ARM", "SMCI", "APP",
-        "VST", "CEG", "GEV", "UBER", "SHOP", "SPOT", "AXON", "MELI", "COIN", "HOOD",
-        "RKLB", "SOFI", "AFRM", "UPST", "REDD", "DUOL", "CAVA", "BROS", "CELH", "ONON",
-        "DECK", "TOST", "IOT", "NET", "DDOG", "SNOW", "ZS", "MDB", "MSTR", "CVNA"
-    ]
-    us_tickers.update(extra_us)
-    for sym in us_tickers:
-        stock_dict[sym] = sym
+    # 若遇網路阻擋之保底機制 (Wikipedia S&P 500 + Nasdaq 100)
+    if len(us_dict) < 100:
+        try:
+            sp_res = requests.get("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", headers=nasdaq_headers, timeout=15)
+            if sp_res.status_code == 200:
+                sp_table = pd.read_html(io.StringIO(sp_res.text))[0]
+                for sym in sp_table['Symbol'].tolist():
+                    s = str(sym).replace('.', '-').strip()
+                    us_dict[s] = s
+                total_raw_count += len(us_dict)
+        except Exception:
+            pass
 
-    print(f"✅ 全市場載入完成：共 {len(stock_dict)} 檔台美股準備掃描！")
-    return stock_dict
+    all_dict = {**tw_dict, **us_dict}
+    print(f"✅ 全市場掃描母體共 {total_raw_count} 檔 (台股 {len(tw_dict)} 檔 + 美股活躍股 {len(us_dict)} 檔進入 K 線深度檢驗)！")
+    return all_dict, total_raw_count
 
 # ==========================================
 # 3. 抓取入選股票的近期 EPS 與年增率
@@ -121,15 +138,55 @@ def get_eps_info(symbol):
         return "財報更新中"
 
 # ==========================================
-# 4. Mark 筆記公式：(波段低點 / 波段高點) - 1
+# 4. 《超級績效》動態週期 VCP 演算法 (支援 3 週 ~ 24 週打底期，不再死鎖 45 天！)
 # ==========================================
-def mark_vcp_drop(high_s, low_s):
-    # 計算該區間內高點與低點的波動收縮百分比：(Swing Low / Swing High) - 1
-    h_max = float(high_s.max())
-    l_min = float(low_s.min())
-    if h_max <= 0:
-        return 0.0
-    return abs((l_min / h_max) - 1.0)
+def analyze_dynamic_vcp(high_s, low_s, close_s):
+    """
+    自動尋找過去 15 ~ 120 個交易日 (3~24週) 的波段最高點作為基底起點，
+    並依該股票實際打底天數動態切分為 T1(左段) -> T2(中段) -> T3(右側近5~8日)，
+    回傳：(打底週數, T1跌幅, T2跌幅, T3右側波幅, 右側精準樞紐價, 基底總深度)
+    """
+    # 尋找過去 15 ~ 120 天內的最高峰作為 VCP 基底起點
+    window_120 = high_s.iloc[-120:-1]
+    peak_idx_pos = window_120.values.argmax()
+    base_days = len(window_120) - peak_idx_pos  # 距離最高峰的交易日數
+
+    # 若最高峰就在最近 15 天內 (屬於短線強勢小旗型)，則以過去 36 天作為觀察窗
+    if base_days < 18:
+        base_days = 36
+
+    base_highs = high_s.iloc[-(base_days + 1):-1]
+    base_lows = low_s.iloc[-(base_days + 1):-1]
+    base_peak = float(base_highs.max())
+    base_min = float(base_lows.min())
+    base_depth = (base_peak - base_min) / base_peak if base_peak > 0 else 0.0
+
+    # 將整個打底期動態切為三段：左段 T1 (前 45%)、中段 T2 (中 35%)、右段 T3 (最後 20%，至少取近 6 日)
+    t3_len = max(6, min(10, int(base_days * 0.22)))
+    rem_days = base_days - t3_len
+    t1_len = max(6, int(rem_days * 0.55))
+    t2_len = max(5, rem_days - t1_len)
+
+    h_t1 = base_highs.iloc[:t1_len]
+    l_t1 = base_lows.iloc[:t1_len]
+    h_t2 = base_highs.iloc[t1_len:t1_len + t2_len]
+    l_t2 = base_lows.iloc[t1_len:t1_len + t2_len]
+    h_t3 = base_highs.iloc[-t3_len:]
+    l_t3 = base_lows.iloc[-t3_len:]
+
+    t1_drop = (float(h_t1.max()) - float(l_t1.min())) / float(h_t1.max()) if len(h_t1) > 0 and h_t1.max() > 0 else base_depth
+    t2_drop = (float(h_t2.max()) - float(l_t2.min())) / float(h_t2.max()) if len(h_t2) > 0 and h_t2.max() > 0 else t1_drop
+    t3_drop = (float(h_t3.max()) - float(l_t3.min())) / float(h_t3.max()) if len(h_t3) > 0 and h_t3.max() > 0 else t2_drop
+
+    # 右側樞紐買點 (Pivot High)：若右側近 12 日高點接近基底大高點 (差距 10% 內)，取右側小高點為樞紐；否則取近 25 日高點
+    right_12d_high = float(high_s.iloc[-13:-1].max())
+    if right_12d_high >= base_peak * 0.90:
+        pivot_price = right_12d_high
+    else:
+        pivot_price = float(high_s.iloc[-26:-1].max())
+
+    base_weeks = round(base_days / 5.0, 1)
+    return base_weeks, t1_drop, t2_drop, t3_drop, pivot_price, base_depth
 
 # ==========================================
 # 5. Telegram 推播函式
@@ -142,20 +199,20 @@ def send_telegram_msg(message):
     except Exception as e:
         print(f"❌ 網路連線錯誤：{e}")
 
-def send_minervini_reports(cat1_breakout, cat2_vcp, cat3_tennis, total_scanned, template_passed):
+def send_minervini_reports(cat1_breakout, cat2_vcp, cat3_tennis, total_universe, kline_scanned, template_passed):
     all_blocks = []
     if cat1_breakout:
-        all_blocks.append("🚀 <b>【一、突破前高樞紐買點 (Pivot Breakout)】</b>\n<i>(Mark準則：VCP收斂完成 + 今日帶量突破前波小高點)</i>")
+        all_blocks.append("🚀 <b>【一、樞紐點帶量突破買點 (Pivot Breakout)】</b>\n<i>(《超級績效》準則：VCP收斂完成 + 今日紅K帶量突破樞紐高點)</i>")
         all_blocks.extend(cat1_breakout)
     if cat2_vcp:
-        all_blocks.append("\n🎯 <b>【二、標準 VCP 波動遞減收斂池 (T1 > T2 > 近5日)】</b>\n<i>(Mark準則：波幅由左至右嚴格縮小、下跌量縮，緊貼前高樞紐等突破)</i>")
+        all_blocks.append("\n🎯 <b>【二、標準 VCP 波動遞減收斂池 (T1 > T2 > T3)】</b>\n<i>(《超級績效》準則：3~24週動態基底波幅由左至右遞減、量縮等突破)</i>")
         all_blocks.extend(cat2_vcp)
     if cat3_tennis:
-        all_blocks.append("\n🎾 <b>【三、網球反彈與淺回檔 (Tennis Ball & Shallow Pullback)】</b>\n<i>(Mark準則：強勢股回測10/20MA量縮守穩或紅K彈升，等右肩突破)</i>")
+        all_blocks.append("\n🎾 <b>【三、第二階段回測支撐／網球反彈 (Pullback & Tennis Ball)】</b>\n<i>(《超級績效》準則：符合八大趨勢模板 + 回測10/20MA守穩或右側構築中)</i>")
         all_blocks.extend(cat3_tennis)
 
     if not all_blocks:
-        send_telegram_msg(f"📊 <b>【Mark Minervini 純血選股雷達】</b>\n已掃描 {total_scanned} 檔，通過趨勢模板 {template_passed} 檔。")
+        send_telegram_msg(f"📊 <b>【《超級績效》全市場選股雷達】</b>\n全市場母體 {total_universe} 檔，深度K線掃描 {kline_scanned} 檔，通過八大模板 {template_passed} 檔。")
         return
 
     chunk_size = 7
@@ -164,13 +221,13 @@ def send_minervini_reports(cat1_breakout, cat2_vcp, cat3_tennis, total_scanned, 
         page = (i // chunk_size) + 1
         chunk = all_blocks[i:i + chunk_size]
         header = (
-            f"📊 <b>【Mark Minervini 純血選股日報】({page}/{total_pages})</b>\n"
-            f"<i>掃描 {total_scanned} 檔｜符合 Mark 趨勢模板 {template_passed} 檔 (台美股均衡入列)</i>\n\n"
+            f"📊 <b>【《超級績效》全市場選股日報】({page}/{total_pages})</b>\n"
+            f"<i>全市場母體 {total_universe} 檔｜深度K線掃描 {kline_scanned} 檔｜符合八大趨勢模板 {template_passed} 檔</i>\n\n"
         )
         send_telegram_msg(header + "\n\n".join(chunk))
 
 # ==========================================
-# 6. 純血版 Mark Minervini 選股引擎 (無重疊區間、保證近5日嚴格收斂)
+# 6. 《超級績效》原書純血引擎
 # ==========================================
 def analyze_market_minervini(stock_dict):
     symbols = list(stock_dict.keys())
@@ -178,10 +235,11 @@ def analyze_market_minervini(stock_dict):
     tw_rs_scores = {}
     us_rs_scores = {}
 
-    start_date = (pd.Timestamp.now() - pd.DateOffset(months=24)).strftime('%Y-%m-%d')
-    batch_size = 120
+    # 下載 15 個月資料 (約 315 個交易日，足以精準計算 52 週高低點與 200MA 趨勢，且下載速度極快)
+    start_date = (pd.Timestamp.now() - pd.DateOffset(months=15)).strftime('%Y-%m-%d')
+    batch_size = 180
 
-    print("📥 正在批次下載全市場歷史 K 線...")
+    print(f"📥 正在高速批次下載 {len(symbols)} 檔台美股歷史 K 線...")
     for i in range(0, len(symbols), batch_size):
         batch = symbols[i:i + batch_size]
         try:
@@ -191,16 +249,17 @@ def analyze_market_minervini(stock_dict):
                     df = data[sym].copy() if len(batch) > 1 else data.copy()
                     df = df[['Open', 'High', 'Low', 'Close', 'Volume']].dropna()
                     df = df[df['Volume'] > 0]
-                    if len(df) < 265:
+                    if len(df) < 252:
                         continue
                     
                     c = df['Close']
                     raw_data[sym] = df
                     
+                    # 歐奈爾 / 《超級績效》RS 相對強弱加權計分
                     r3m = (c.iloc[-1] / c.iloc[-63]) - 1
                     r6m = (c.iloc[-1] / c.iloc[-126]) - 1
                     r9m = (c.iloc[-1] / c.iloc[-189]) - 1
-                    r12m = (c.iloc[-1] / c.iloc[-252]) - 1
+                    r12m = (c.iloc[-1] / c.iloc[-250]) - 1
                     score = 0.4 * r3m + 0.2 * r6m + 0.2 * r9m + 0.2 * r12m
                     
                     if sym.endswith(".TW") or sym.endswith(".TWO"):
@@ -218,7 +277,6 @@ def analyze_market_minervini(stock_dict):
     if us_rs_scores:
         rs_rating_map.update((pd.Series(us_rs_scores).rank(pct=True) * 99).round(0).astype(int).to_dict())
 
-    # 台股與美股分開存放，確保台股永遠不會被美股擠掉！
     tw_breakout, us_breakout = [], []
     tw_vcp, us_vcp = [], []
     tw_tennis, us_tennis = [], []
@@ -246,206 +304,158 @@ def analyze_market_minervini(stock_dict):
         vol_ma20 = vol.rolling(20).mean()
         vol_ma50 = vol.rolling(50).mean()
 
-        if vol_ma20.iloc[-1] < 250000:
+        if vol_ma20.iloc[-1] < 200000:
             continue
 
         # ====================================================
-        # 👑 準則 1：Mark Minervini 趨勢模板 (Trend Template)
+        # 👑 第一關：《超級績效》原書第 5 章「八大趨勢模板 (8-Point Trend Template)」
         # ====================================================
         high_52w = high.iloc[-252:].max()
         low_52w = low.iloc[-252:].min()
-        ma200_rising_3m = (ma200.iloc[-1] > ma200.iloc[-21]) and (ma200.iloc[-21] > ma200.iloc[-42]) and (ma200.iloc[-42] > ma200.iloc[-63])
-        rolling_52w_high = high.rolling(252).max()
-        made_high_in_6m = (high.iloc[-126:] >= rolling_52w_high.iloc[-126:] * 0.99).any()
+
+        # 原書八大條件：
+        # 1. 股價 > 150MA 且 > 200MA
+        # 2. 150MA > 200MA
+        # 3. 200MA 持續上升至少 1~2 個月以上
+        # 4. 50MA > 150MA 且 > 200MA
+        # 5. 股價 > 50MA
+        # 6. 股價高於 52 週低點至少 30%
+        # 7. 股價距離 52 週高點 25% 以內
+        # 8. RS 排名 >= 80 (原書要求不低於 70，以 80~90 以上為佳)
+        ma200_trending_up = (ma200.iloc[-1] > ma200.iloc[-22]) and (ma200.iloc[-22] >= ma200.iloc[-44])
 
         trend_template_pass = (
-            (c_now > ma50.iloc[-1] > ma150.iloc[-1] > ma200.iloc[-1]) and
-            ma200_rising_3m and
+            (c_now > ma150.iloc[-1]) and (c_now > ma200.iloc[-1]) and
+            (ma150.iloc[-1] > ma200.iloc[-1]) and
+            ma200_trending_up and
+            (ma50.iloc[-1] > ma150.iloc[-1]) and (ma50.iloc[-1] > ma200.iloc[-1]) and
+            (c_now > ma50.iloc[-1]) and
             (c_now >= low_52w * 1.30) and
             (c_now >= high_52w * 0.75) and
-            made_high_in_6m and
             (rs_rating >= 80)
         )
         if not trend_template_pass:
             continue
 
-        # 排除上海商銀這種「短期均線空頭排列下彎 (5MA < 10MA < 20MA) 且壓在月線下」的走弱股
+        # 排除短期均線 5<10<20 蓋頭下彎且跌破月線的短空股 (如上海商銀)
         if (ma5.iloc[-1] < ma10.iloc[-1] < ma20.iloc[-1]) and (c_now < ma20.iloc[-1]):
-            continue
-        # 50MA 季線本身也必須是向上趨勢
-        if ma50.iloc[-1] < ma50.iloc[-10]:
             continue
 
         template_passed_count += 1
         doubled_from_low = (c_now >= low_52w * 2.0)
 
         # ====================================================
-        # 👑 準則 2：Mark 價量準則 (漲量多跌量縮、排除巨量綠K出貨與崩跌基底)
+        # 👑 第二關：《超級績效》第 10 章「價量行為與出貨過濾」
         # ====================================================
-        # 1. 整理基底從高點回檔不得超過 32% (淘汰大甲那種跌42%的結構破壞股)
-        peak_6m = high.iloc[-126:].max()
-        peak_6m_pos = high.iloc[-126:].values.argmax()
-        low_after_peak = low.iloc[-126 + peak_6m_pos:].min()
-        if ((peak_6m - low_after_peak) / peak_6m) > 0.32:
-            continue
-
-        # 2. 定義真紅 K (收盤>開盤 且 上漲) 與 綠 K / 下跌黑 K
         is_green_bar = (close < open_p) | (close < close.shift(1))
         is_true_red_bar = (close >= open_p) & (close > close.shift(1))
 
-        # 過去 60 天最大量的前 2 根 K 棒絕不能是下跌綠 K (淘汰寶雅 8.4萬張綠K、中鼎 2.29萬張綠K)
+        # 1. 過去 60 天最大量的前 2 根 K 棒不能是下跌黑 K / 綠 K (淘汰寶雅、中鼎那種天量出貨圖)
         top2_vol_dates = vol.iloc[-60:].nlargest(2).index
         if ((close.loc[top2_vol_dates] < open_p.loc[top2_vol_dates]) | (close.loc[top2_vol_dates] < close.shift(1).loc[top2_vol_dates])).any():
             continue
 
-        # 過去 20 天內不得出現「收黑下跌超過 1.5% 且爆出 2 倍均量」的出貨長黑棒 (淘汰藥華藥、佳大)
-        heavy_dump_20d = ((close.iloc[-20:] < open_p.iloc[-20:] * 0.985) | (close.iloc[-20:] < close.shift(1).iloc[-20:] * 0.98)) & (vol.iloc[-20:] >= vol_ma20.iloc[-20:] * 2.0)
-        if heavy_dump_20d.any():
-            continue
-
-        # 今日若為黑K下跌且出量 (>1.2倍均量)，直接排除
+        # 2. 今日不可為帶量長黑下跌 (淘汰藥華藥那種當日倒貨棒)
         vol_ratio_today = vol.iloc[-1] / vol_ma20.iloc[-2] if vol_ma20.iloc[-2] > 0 else 1.0
-        if ((c_now < o_now) or (c_now < c_prev)) and (vol_ratio_today >= 1.2):
+        if ((c_now < o_now * 0.99) or (c_now < c_prev * 0.99)) and (vol_ratio_today >= 1.25):
             continue
 
-        # 計算近 30 日「上漲紅K均量 vs 下跌綠K均量」(Up Volume vs Down Volume)
+        # 3. 計算近 30 日紅 K 均量 vs 綠 K 均量，以及近 5 日量縮比率
         red_v30 = vol.iloc[-30:][is_true_red_bar.iloc[-30:]]
         green_v30 = vol.iloc[-30:][is_green_bar.iloc[-30:]]
         avg_red_v = red_v30.mean() if len(red_v30) > 0 else 0
         avg_green_v = green_v30.mean() if len(green_v30) > 0 else 1
         up_down_vol_ratio = avg_red_v / avg_green_v if avg_green_v > 0 else 1.0
 
-        # 必須符合「上漲有量、下跌量縮」(紅綠均量比 >= 1.0，或近 5 日量縮至 20日均量的 80% 以下)
         vol_5d_avg = vol.iloc[-5:].mean()
-        vol_shrink_pct = (vol_5d_avg / vol_ma20.iloc[-1]) * 100 if vol_ma20.iloc[-1] > 0 else 100
-        if (up_down_vol_ratio < 1.0) and (vol_shrink_pct > 80):
+        vol_shrink_pct = (vol_5d_avg / vol_ma50.iloc[-1]) * 100 if vol_ma50.iloc[-1] > 0 else 100
+
+        # 漲量 > 跌量，或近期明顯量縮整理
+        if (up_down_vol_ratio < 0.90) and (vol_shrink_pct > 85):
             continue
 
         # ====================================================
-        # 👑 準則 3：Mark VCP 收縮公式 (三個完全不重疊區間：T1 ➔ T2 ➔ T3)
-        # 統一使用貼文公式：(Swing Low / Swing High) - 1
+        # 👑 第三關：《超級績效》動態週期 VCP (支援 3 ~ 24 週打底)
         # ====================================================
-        # T1 (左段：前 21~45 日)、T2 (中段：前 6~20 日)、T3 (右段：最近 5 日)
-        t1_drop = mark_vcp_drop(high.iloc[-45:-20], low.iloc[-45:-20])
-        t2_drop = mark_vcp_drop(high.iloc[-20:-5], low.iloc[-20:-5])
-        t3_drop = mark_vcp_drop(high.iloc[-5:], low.iloc[-5:])
-        # 針對今日突破股，計算「突破前 5 日 (-6:-1)」的收縮度
-        t3_pre_breakout = mark_vcp_drop(high.iloc[-6:-1], low.iloc[-6:-1])
+        base_weeks, t1_drop, t2_drop, t3_drop, pivot_high, base_depth = analyze_dynamic_vcp(high, low, close)
 
-        # 前波小高點 = 樞紐買點 (Previous Swing High)
-        # 若近 12 日已在高檔形成窄幅箱型，取近 12 日高點為右側小樞紐；否則取近 25 日高點
-        base_high_45 = high.iloc[-45:-1].max()
-        swing_high_12 = high.iloc[-13:-1].max()
-        if (t2_drop <= 0.12) and (swing_high_12 >= base_high_45 * 0.90):
-            pivot_high = swing_high_12
-            pivot_label = f"前波小高點 <b>{pivot_high:.2f}</b>"
-        else:
-            pivot_high = high.iloc[-25:-1].max()
-            pivot_label = f"前高樞紐 <b>{pivot_high:.2f}</b>"
+        # 原書準則：一般 VCP 基底總回檔深度不超過 35% (淘汰大甲那種跌 42% 過深的結構)
+        if base_depth > 0.35:
+            continue
 
         dist_to_pivot = (c_now - pivot_high) / pivot_high
-        # 若已突破樞紐點超過 +6% 以上，代表已脫離買點不追高
-        if dist_to_pivot > 0.06 or dist_to_pivot < -0.15:
+        # 若已突破樞紐點超過 +6% 以上，代表已錯過最佳買點不追高 (淘汰騰雲)
+        if dist_to_pivot > 0.06 or dist_to_pivot < -0.16:
             continue
 
-        # ====================================================
-        # 👑 準則 4：Mark 停損公式 (2x 20日ATR，最大不超過 10%)
-        # ====================================================
+        # 停損計算 (2x ATR，最大不超過 8%~10%，完全符合原書停損守則)
         tr = pd.concat([high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1).max(axis=1)
         atr20 = tr.rolling(20).mean().iloc[-1]
-        stop_distance = min(2 * atr20, c_now * 0.10)
+        stop_distance = min(2 * atr20, c_now * 0.08)
         stop_price = c_now - stop_distance
         stop_pct = (stop_distance / c_now) * 100
 
-        # ====================================================
-        # 🧩 配角輔助資訊 (VWAP / Wedge Pop / Zanger Vol / 翻倍標籤)
-        # ====================================================
+        # 配角輔助指標
         tags = [f"📊漲/跌量比 {up_down_vol_ratio:.1f}x"]
         if doubled_from_low:
-            tags.append("👑低點翻倍(+100%)")
-
+            tags.append("👑低點翻倍")
         peak_60_idx = high.iloc[-61:-1].idxmax()
         sub_df = df.loc[peak_60_idx:]
         tp = (sub_df['High'] + sub_df['Low'] + sub_df['Close']) / 3
         vwap_series = (tp * sub_df['Volume']).cumsum() / sub_df['Volume'].cumsum()
         vwap_now = vwap_series.iloc[-1]
         if c_now >= vwap_now:
-            tags.append(f"✅高點VWAP之上({vwap_now:.1f})")
-
-        ema10 = close.ewm(span=10, adjust=False).mean()
-        ema20 = close.ewm(span=20, adjust=False).mean()
-        if (low.iloc[-6:-1] <= ema20.iloc[-6:-1] * 1.01).any() and (c_now > ema10.iloc[-1]) and (c_now > ema20.iloc[-1]) and (c_prev <= ema10.iloc[-2]):
-            tags.append("⚡Wedge Pop")
+            tags.append(f"✅VWAP之上({vwap_now:.1f})")
 
         flag = "🇹🇼" if is_tw else "🇺🇸"
         title = f"{flag} {symbol} {name}" if name != symbol else f"{flag} {symbol}"
         support_str = " | ".join(tags)
+        vcp_str = f"打底 {base_weeks}週：T1(-{t1_drop*100:.1f}%) ➔ T2(-{t2_drop*100:.1f}%) ➔ T3右側(-<b>{t3_drop*100:.1f}%</b>)"
         is_red_today = (c_now > o_now) and (c_now > c_prev) and ((c_now - l_now) >= (h_now - l_now) * 0.5 if h_now > l_now else True)
 
         # ====================================================
-        # 👑 嚴格依 Mark 三大實戰型態分流 (保證近5日 T3 嚴格收斂！)
+        # 👑 第四關：三大實戰分流 (計分排序制，保證台股與美股皆有精選名單！)
         # ====================================================
-        # 1. 🚀 【突破前高樞紐買點】：突破前5日已收斂 (t3_pre <= t2 且 <= 8.5%) + 今日帶量紅K突破 pivot_high
-        if (t3_pre_breakout < max(t1_drop, t2_drop) * 0.75) and (t3_pre_breakout <= 0.085) and is_red_today and (c_now > pivot_high) and (c_prev <= pivot_high) and (vol_ratio_today >= 1.3):
-            vcp_str = f"T1(-{t1_drop*100:.1f}%) ➔ T2(-{t2_drop*100:.1f}%) ➔ 突破前5日(-<b>{t3_pre_breakout*100:.1f}%</b>)"
-            score = rs_rating + (20 if doubled_from_low else 0) + int(vol_ratio_today * 10)
-            item = (score, symbol, title, c_now, rs_rating, f"紅K帶量({vol_ratio_today:.1f}倍)突破 {pivot_label}", vcp_str, support_str, stop_price, stop_pct)
-            if is_tw:
-                tw_breakout.append(item)
-            else:
-                us_breakout.append(item)
+        # 1. 🚀 【今日突破樞紐買點】：今日帶量紅K突破 pivot_high，且突破前右側已收斂
+        if is_red_today and (c_now > pivot_high) and (c_prev <= pivot_high) and (vol_ratio_today >= 1.3) and (t3_drop <= t1_drop * 0.80):
+            score = rs_rating + int(vol_ratio_today * 15) + (20 if doubled_from_low else 0)
+            status_str = f"今日紅K帶量({vol_ratio_today:.1f}倍)突破樞紐點 <b>{pivot_high:.2f}</b>"
+            item = (score, symbol, title, c_now, rs_rating, status_str, vcp_str, support_str, stop_price, stop_pct)
+            (tw_breakout if is_tw else us_breakout).append(item)
 
         # 2. 🎯 【標準 VCP 波動遞減收斂池】：
-        # 強制規定：T3(近5日) < T2(中段) 且 T3 <= 前波最大收縮的一半(或65%) 且 T3 <= 8.0%！
-        # 如此一來，近 5 日數字在數學上 100% 絕對比前面小，絕不可能變大！
-        elif (
-            (c_now <= pivot_high) and
-            (c_now >= ma20.iloc[-1]) and
-            (ma20.iloc[-1] >= ma20.iloc[-5]) and
-            (t3_drop < t2_drop * 0.90) and
-            (t3_drop <= max(t1_drop, t2_drop) * 0.65) and
-            (t3_drop <= 0.080) and
-            (vol_shrink_pct <= 95)
-        ):
-            dist_pct = ((pivot_high - c_now) / c_now) * 100
-            vcp_str = f"T1(-{t1_drop*100:.1f}%) ➔ T2(-{t2_drop*100:.1f}%) ➔ 近5日(-<b>{t3_drop*100:.1f}%</b>)"
-            # 近 5 日越窄、離樞紐點越近，排序越前面
-            score = rs_rating + int((0.10 - t3_drop) * 500) + (15 if doubled_from_low else 0)
-            status_str = f"差 +{dist_pct:.1f}% 突破 {pivot_label}｜近5日量 {vol_shrink_pct:.0f}%"
-            item = (score, symbol, title, c_now, rs_rating, status_str, vcp_str, support_str, stop_price, stop_pct)
-            if is_tw:
-                tw_vcp.append(item)
-            else:
-                us_vcp.append(item)
-
-        # 3. 🎾 【網球反彈與淺回檔 (Tennis Ball Action & Shallow Pullback)】：
-        # 強勢股回測 10MA/20MA 後迅速彈回均線之上收紅K (或拉出長下影線守穩月線)，且近5日波幅 < 中段波幅
+        # 只要動態週期滿足「右側 T3 < 左側 T1」且「T3 <= T2 (或 T3 已壓縮至 7.5% 內)」且股價穩守月線之上等待突破！
         elif (
             (c_now <= pivot_high) and
             (c_now >= ma20.iloc[-1] * 0.99) and
-            (low.iloc[-5:].min() <= ma20.iloc[-5:].max() * 1.02) and
-            (is_red_today or ((min(o_now, c_now) - l_now) / (h_now - l_now + 0.001) >= 0.40)) and
-            (t3_drop < max(t1_drop, t2_drop) * 0.85) and
-            (t3_drop <= 0.095)
+            (t3_drop < t1_drop * 0.80) and
+            ((t3_drop <= t2_drop * 1.02) or (t3_drop <= 0.075)) and
+            (t3_drop <= 0.10)
         ):
             dist_pct = ((pivot_high - c_now) / c_now) * 100
-            vcp_str = f"T1(-{t1_drop*100:.1f}%) ➔ T2(-{t2_drop*100:.1f}%) ➔ 近5日(-<b>{t3_drop*100:.1f}%</b>)"
-            score = rs_rating + int((0.10 - t3_drop) * 300) + (15 if doubled_from_low else 0)
-            action_type = "回測20MA紅K網球彈升" if is_red_today else "回測20MA量縮長下影線"
-            status_str = f"{action_type}｜上檔 {pivot_label} (差 +{dist_pct:.1f}%)"
+            # 評分：右側 T3 越窄、離樞紐點越近、量越縮，排名越前面！
+            score = rs_rating + int((0.12 - t3_drop) * 400) + int((0.15 - abs(dist_to_pivot)) * 150) + (15 if vol_shrink_pct <= 85 else 0)
+            status_str = f"差 +{dist_pct:.1f}% 突破樞紐 <b>{pivot_high:.2f}</b>｜近期量為均量 {vol_shrink_pct:.0f}%"
             item = (score, symbol, title, c_now, rs_rating, status_str, vcp_str, support_str, stop_price, stop_pct)
-            if is_tw:
-                tw_tennis.append(item)
-            else:
-                us_tennis.append(item)
+            (tw_vcp if is_tw else us_vcp).append(item)
 
-    # 排序並確保「台股 🇹🇼 與美股 🇺🇸 各自都有名額」，絕不讓美股把台股擠掉！
+        # 3. 🎾 【第二階段回測支撐／網球反彈池】：
+        # 通過八大趨勢模板與無出貨檢驗，正在回測 10MA/20MA 守穩或構築右肩的強勢股
+        elif (c_now <= pivot_high) and (c_now >= ma20.iloc[-1] * 0.98) and (t3_drop <= t1_drop):
+            dist_pct = ((pivot_high - c_now) / c_now) * 100
+            score = rs_rating + int((0.15 - t3_drop) * 200) + (15 if is_red_today else 0)
+            action_tag = "回測月線紅K彈升(網球反彈)" if (low.iloc[-4:].min() <= ma20.iloc[-1] * 1.02 and is_red_today) else "站穩均線右肩收斂中"
+            status_str = f"{action_tag}｜上檔樞紐 <b>{pivot_high:.2f}</b> (差 +{dist_pct:.1f}%)"
+            item = (score, symbol, title, c_now, rs_rating, status_str, vcp_str, support_str, stop_price, stop_pct)
+            (tw_tennis if is_tw else us_tennis).append(item)
+
+    # 依 VCP 品質分數由高到低排序，台股與美股各自獨立保障名額
     for lst in [tw_breakout, us_breakout, tw_vcp, us_vcp, tw_tennis, us_tennis]:
         lst.sort(key=lambda x: x[0], reverse=True)
 
-    selected_breakouts = tw_breakout[:4] + us_breakout[:3]
-    selected_vcp = tw_vcp[:6] + us_vcp[:4]
-    selected_tennis = tw_tennis[:5] + us_tennis[:3]
+    selected_breakouts = tw_breakout[:4] + us_breakout[:4]
+    selected_vcp = tw_vcp[:6] + us_vcp[:5]
+    selected_tennis = tw_tennis[:4] + us_tennis[:4]
 
     print("💰 正在為入選台美股查詢最新季報 EPS 數據...")
     def format_block(items, prefix_icon):
@@ -456,10 +466,10 @@ def analyze_market_minervini(stock_dict):
             out.append(
                 f"<b>{title}</b> (收盤: {c_now:.2f} | <b>RS: {rs}</b>)\n"
                 f" ├ {prefix_icon} <b>狀態</b>：{status_s}\n"
-                f" ├ 📐 <b>VCP收縮</b>：{vcp_s}\n"
+                f" ├ 📐 <b>VCP結構</b>：{vcp_s}\n"
                 f" ├ 💰 <b>獲利表現</b>：{eps_str}\n"
                 f" ├ 💡 <b>價量配角</b>：{sup_s}\n"
-                f" └ 🛡️ <b>2xATR停損</b>：<b>{sp:.2f}</b> (-{sp_pct:.1f}%)"
+                f" └ 🛡️ <b>建議停損</b>：<b>{sp:.2f}</b> (-{sp_pct:.1f}%)"
             )
         return out
 
@@ -472,6 +482,6 @@ def analyze_market_minervini(stock_dict):
     )
 
 if __name__ == "__main__":
-    stock_dict = get_full_market_stock_list()
-    cat1, cat2, cat3, total_scanned, template_passed = analyze_market_minervini(stock_dict)
-    send_minervini_reports(cat1, cat2, cat3, total_scanned, template_passed)
+    stock_dict, total_universe = get_entire_market_universe()
+    cat1, cat2, cat3, kline_scanned, template_passed = analyze_market_minervini(stock_dict)
+    send_minervini_reports(cat1, cat2, cat3, total_universe, kline_scanned, template_passed)
