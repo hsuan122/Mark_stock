@@ -25,12 +25,13 @@ jobs:
         run: |
           pip install -U yfinance pandas numpy requests lxml html5lib
 
-      - name: 4. 執行 7 大指標選股並推播 Telegram
+      - name: 4. 執行《超級績效》日報與《小哥短線處置戰法》日報
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python scanner.py
+          python xiaoge_scanner.py
 
       - name: 5. 自動打卡防休眠 (解決 GitHub 60 天停用問題)
         run: |
