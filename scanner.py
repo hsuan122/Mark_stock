@@ -1,5 +1,7 @@
 import os
 import io
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -14,7 +16,38 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "請換成你的_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "請換成你的_CHAT_ID")
 
 # ==========================================
-# 2. 全市場股票池抓取 (台股全上市櫃 + 美股全市場)
+# 2. 《超級績效》p.270 盤中推估成交量乘數計算器
+# ==========================================
+def get_intraday_vol_multiplier(last_bar_date, is_tw):
+    """
+    若最後一根 K 棒為「今日盤中即時 K 棒」，依原書 p.270 按已開盤時間比例推估全天成交量：
+    - 台股：09:00 ~ 13:30 (共 270 分鐘)
+    - 美股：09:30 ~ 16:00 (共 390 分鐘，即開盤2小時+剩餘4.5小時=6.5小時)
+    回傳：(成交量放大乘數, 是否為盤中預估 bool)
+    """
+    try:
+        bar_date = pd.Timestamp(last_bar_date).date()
+        if is_tw:
+            now_tw = datetime.now(ZoneInfo("Asia/Taipei"))
+            if bar_date == now_tw.date():
+                mins_from_open = (now_tw.hour * 60 + now_tw.minute) - (9 * 60)
+                if 5 <= mins_from_open < 270:
+                    # 開盤前 15 分鐘最高放大 12 倍上限，避免剛開盤第 1 分鐘瞬間爆表失真
+                    mult = min(12.0, 270.0 / max(15, mins_from_open))
+                    return mult, True
+        else:
+            now_ny = datetime.now(ZoneInfo("America/New_York"))
+            if bar_date == now_ny.date():
+                mins_from_open = (now_ny.hour * 60 + now_ny.minute) - (9 * 60 + 30)
+                if 5 <= mins_from_open < 390:
+                    mult = min(12.0, 390.0 / max(15, mins_from_open))
+                    return mult, True
+    except Exception:
+        pass
+    return 1.0, False
+
+# ==========================================
+# 3. 全市場股票池抓取 (台股全上市櫃 + 美股全市場)
 # ==========================================
 def get_entire_market_universe():
     tw_dict = {}
@@ -91,12 +124,9 @@ def get_entire_market_universe():
     return all_dict, total_raw_count
 
 # ==========================================
-# 3. 查詢 EPS、營收成長與「財報是否超預期 (Earnings & Revenue Beat)」
+# 4. 查詢 EPS、營收成長與「財報是否超預期 (Earnings & Revenue Beat)」
 # ==========================================
 def get_eps_and_surprise_info(symbol):
-    """
-    回傳：(顯示字串, 是否財報/營收超預期 bool, 超預期標籤字串)
-    """
     try:
         tk = yf.Ticker(symbol)
         info = tk.info or {}
@@ -104,7 +134,6 @@ def get_eps_and_surprise_info(symbol):
         q_growth = info.get('earningsQuarterlyGrowth')
         rev_growth = info.get('revenueGrowth')
 
-        # 檢查分析師財報驚喜度 (Earnings Surprise %)
         surprise_pct = None
         try:
             eh = tk.earnings_history
@@ -112,7 +141,6 @@ def get_eps_and_surprise_info(symbol):
                 valid_eh = eh['surprisePercent'].dropna()
                 if len(valid_eh) > 0:
                     surprise_pct = float(valid_eh.iloc[-1]) * 100.0
-                    # 若欄位本身已是百分比數值(如 15.2 而非 0.152)，自動校正
                     if abs(surprise_pct) > 500:
                         surprise_pct = float(valid_eh.iloc[-1])
         except Exception:
@@ -145,7 +173,6 @@ def get_eps_and_surprise_info(symbol):
             r_sign = "+" if rev_growth >= 0 else ""
             parts.append(f"營收年增: <b>{r_sign}{rev_growth*100:.1f}%</b>")
 
-        # 判定是否符合「財報/營收超預期」
         beat_tags = []
         is_beat = False
         if surprise_pct is not None and surprise_pct >= 5.0:
@@ -167,7 +194,7 @@ def get_eps_and_surprise_info(symbol):
         return "財報更新中", False, ""
 
 # ==========================================
-# 4. 《超級績效》技術面足跡 (XW A/B NT) 演算法 (保持與上一版完全相同)
+# 5. 《超級績效》技術面足跡 (XW A/B NT) 演算法
 # ==========================================
 def analyze_minervini_footprint(high_s, low_s, close_s, vol_s, vol_ma50_s):
     lookback = min(180, len(high_s) - 2)
@@ -267,7 +294,7 @@ def analyze_minervini_footprint(high_s, low_s, close_s, vol_s, vol_ma50_s):
     }
 
 # ==========================================
-# 5. Telegram 推播函式
+# 6. Telegram 推播函式
 # ==========================================
 def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -280,7 +307,7 @@ def send_telegram_msg(message):
 def send_minervini_reports(cat1_brk, cat2_star, cat3_squat, cat4_pb, cat5_beat, total_universe, kline_scanned, template_passed):
     all_blocks = []
     if cat1_brk:
-        all_blocks.append("🚀 <b>【一、今日突破樞紐買點 (Pivot Breakout — 立即行動)】</b>\n<i>(p.266/270：完成 VCP/箱形收斂 + 今日帶量穿越最小阻力樞紐線)</i>")
+        all_blocks.append("🚀 <b>【一、今日突破樞紐買點 (Pivot Breakout — 立即行動)】</b>\n<i>(p.266/270：完成 VCP/箱形收斂 + 帶量穿越最小阻力樞紐線，含盤中推估量)</i>")
         all_blocks.extend(cat1_brk)
     if cat2_star:
         all_blocks.append("\n★◎ <b>【二、星號圓圈：樞紐點成型池 (Pivot Ready — 隨時突破)】</b>\n<i>(p.268/277：已完成 2T/3T/Darvas 右側窄幅收斂 + 樞紐量縮，設觸價單等突破)</i>")
@@ -311,7 +338,7 @@ def send_minervini_reports(cat1_brk, cat2_star, cat3_squat, cat4_pb, cat5_beat, 
         send_telegram_msg(header + "\n\n".join(chunk))
 
 # ==========================================
-# 6. 主引擎
+# 7. 主引擎 (內建 p.270 盤中預估量自動校正)
 # ==========================================
 def analyze_market_minervini(stock_dict):
     symbols = list(stock_dict.keys())
@@ -363,7 +390,7 @@ def analyze_market_minervini(stock_dict):
     tw_star, us_star = [], []
     tw_squat, us_squat = [], []
     tw_pb, us_pb = [], []
-    momentum_burst_candidates = [] # 候選進入「第五區：獨立財報超預期榜」之強勢跳空/爆量股
+    momentum_burst_candidates = []
     template_passed_count = 0
 
     for symbol, df in raw_data.items():
@@ -421,7 +448,12 @@ def analyze_market_minervini(stock_dict):
         up_vol_spikes = int((above_avg_vol & up_bars_40).sum())
         down_vol_spikes = int((above_avg_vol & down_bars_40).sum())
 
-        vol_ratio_today = float(vol.iloc[-1] / vol_ma50.iloc[-2]) if vol_ma50.iloc[-2] > 0 else 1.0
+        # 【新增 p.270 盤中推估成交量】若正在盤中交易，自動按已開盤時間比例推算全天預估量倍數！
+        intraday_mult, is_intraday = get_intraday_vol_multiplier(df.index[-1], is_tw)
+        raw_vol_ratio = float(vol.iloc[-1] / vol_ma50.iloc[-2]) if vol_ma50.iloc[-2] > 0 else 1.0
+        vol_ratio_today = raw_vol_ratio * intraday_mult
+        vol_type_label = "盤中預估量" if is_intraday else "帶量"
+
         is_red_today = (c_now > o_now) and (c_now > c_prev) and ((c_now - l_now) >= (h_now - l_now) * 0.5 if h_now > l_now else True)
 
         tr = pd.concat([high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1).max(axis=1)
@@ -433,9 +465,8 @@ def analyze_market_minervini(stock_dict):
         flag = "🇹🇼" if is_tw else "🇺🇸"
         title = f"{flag} {symbol} {name}" if name != symbol else f"{flag} {symbol}"
 
-        # 收集今日帶量跳空或大漲創高的領導股，稍後檢查是否為「財報/營收超預期」獨立專區標的
         if is_red_today and (vol_ratio_today >= 1.5) and (c_now >= high.iloc[-20:-1].max()):
-            momentum_burst_candidates.append((rs_rating + int(vol_ratio_today * 10), symbol, title, c_now, rs_rating, vol_ratio_today, stop_price, stop_pct))
+            momentum_burst_candidates.append((rs_rating + int(vol_ratio_today * 10), symbol, title, c_now, rs_rating, vol_ratio_today, vol_type_label, stop_price, stop_pct))
 
         max_vol_date = vol.iloc[-60:].idxmax()
         if (close.loc[max_vol_date] < open_p.loc[max_vol_date] * 0.99) or (close.loc[max_vol_date] < close.shift(1).loc[max_vol_date] * 0.99):
@@ -484,11 +515,13 @@ def analyze_market_minervini(stock_dict):
         support_str = " | ".join(tags)
         above_20ma = c_now >= float(ma20.iloc[-1])
 
+        # 1. 🚀 【今日突破樞紐買點 (含盤中預估量支援)】
         if fp["is_vcp"] and above_20ma and is_red_today and (c_now > pivot_price) and (c_prev <= pivot_price) and (vol_ratio_today >= 1.35):
-            status_str = f"今日帶量({vol_ratio_today:.1f}倍)突破 {fp['pivot_desc']}"
+            status_str = f"今日{vol_type_label}({vol_ratio_today:.1f}倍)突破 {fp['pivot_desc']}"
             item = (sepa_score + 30, symbol, title, c_now, rs_rating, status_str, fp["footprint_detail"], support_str, stop_price, stop_pct)
             (tw_brk if is_tw else us_brk).append(item)
 
+        # 2. ★◎ 【星號圓圈：樞紐點成型池】
         elif fp["is_vcp"] and above_20ma and (c_now <= pivot_price) and (dist_to_pivot_pct >= -6.5) and (fp["last_drop"] <= 7.0) and (fp["vol_pct_50ma"] <= 95.0):
             gap_pct = abs(dist_to_pivot_pct)
             star_mark = "★◎" if (fp["has_dryup"] and fp["last_drop"] <= 5.0) else "★"
@@ -496,11 +529,13 @@ def analyze_market_minervini(stock_dict):
             item = (sepa_score + 20, symbol, title, c_now, rs_rating, status_str, fp["footprint_detail"], support_str, stop_price, stop_pct)
             (tw_star if is_tw else us_star).append(item)
 
+        # 3. 🔄 【Squat/RR 蹲下反轉 & 網球折返】
         elif above_20ma and (float(high.iloc[-8:-1].max()) >= pivot_price * 0.99) and (c_now <= pivot_price * 1.02) and is_red_today and (fp["last_drop"] <= 8.5):
             status_str = f"<b>Squat/網球回升</b>｜守穩 20MA({ma20.iloc[-1]:.1f}) 轉強｜樞紐 <b>{pivot_price:.2f}</b>"
             item = (sepa_score + 10, symbol, title, c_now, rs_rating, status_str, fp["footprint_detail"], support_str, stop_price, stop_pct)
             (tw_squat if is_tw else us_squat).append(item)
 
+        # 4. 📌 【pb 拉回整理觀察池】
         elif (c_now <= pivot_price) and (fp["last_drop"] <= fp["first_drop"] * 0.70) and (fp["last_drop"] <= 9.0) and (float(ma20.iloc[-1]) >= float(ma20.iloc[-10])):
             gap_pct = abs(dist_to_pivot_pct)
             status_str = f"<b>pb 拉回整理</b>｜距 {fp['pivot_desc']} +{gap_pct:.1f}%｜等最右端量縮突破"
@@ -524,7 +559,6 @@ def analyze_market_minervini(stock_dict):
             _, sym, title, c_now, rs, status_s, fp_s, sup_s, sp, sp_pct = item
             already_listed_symbols.add(sym)
             eps_str, is_beat, beat_tag = get_eps_and_surprise_info(sym)
-            # 【規則】若上榜的 VCP 股票同時有財報/營收超預期，直接在標題旁醒目標註！
             title_display = f"{title} 🔥<b>[{beat_tag}]</b>" if is_beat else title
             out.append(
                 f"<b>{title_display}</b> (收盤: {c_now:.2f} | <b>RS: {rs}</b>)\n"
@@ -541,17 +575,16 @@ def analyze_market_minervini(stock_dict):
     b3 = format_block(sel_squat, "🔄")
     b4 = format_block(sel_pb, "📌")
 
-    # 【規則】未在前面 VCP 清單上榜、但今日帶量創高且「財報/營收超預期」之標的，獨立列於第五區！
     b5_beat = []
     for item in momentum_burst_candidates[:25]:
-        _, sym, title, c_now, rs, v_ratio, sp, sp_pct = item
+        _, sym, title, c_now, rs, v_ratio, v_label, sp, sp_pct = item
         if sym in already_listed_symbols:
             continue
         eps_str, is_beat, beat_tag = get_eps_and_surprise_info(sym)
         if is_beat:
             b5_beat.append(
                 f"<b>{title}</b> 🔥<b>[{beat_tag}]</b> (收盤: {c_now:.2f} | <b>RS: {rs}</b>)\n"
-                f" ├ 💥 <b>財報催化</b>：今日帶量({v_ratio:.1f}倍)強勢突破創高\n"
+                f" ├ 💥 <b>財報催化</b>：今日{v_label}({v_ratio:.1f}倍)強勢突破創高\n"
                 f" ├ 💰 <b>獲利表現</b>：{eps_str}\n"
                 f" └ 🛡️ <b>建議停損</b>：<b>{sp:.2f}</b> (-{sp_pct:.1f}%)"
             )
