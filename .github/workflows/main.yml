@@ -31,7 +31,6 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python scanner.py
-          python xiaoge_scanner.py
 
       - name: 5. 自動打卡防休眠 (解決 GitHub 60 天停用問題)
         run: |
