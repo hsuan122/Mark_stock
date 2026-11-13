@@ -1,5 +1,5 @@
-"""
-《超級績效》SEPA / VCP 選股雷達  (重寫版)
+ """
+《超級績效》SEPA / VCP 選股雷達 (Claude 原版 VCP 核心 + 進場日 2xATR 固定停損整合版)
 
 對照書中頁碼：
   p.106      趨勢樣板八項準則
@@ -36,7 +36,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "請換成你的_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "請換成你的_CHAT_ID")
 
 # 📦 持股追蹤："代號": {"cost": 成本, "date": "進場日(美股用美東日期)", "stop": 可選，自訂停損價}
-#    停損價在進場時就固定 (cost × (1 - MAX_STOP_PCT))，不會隨現價移動。
+#    未填 "stop" 時，自動依進場日 2xATR (夾在 3%~8%) 固定於成本下方，不隨現價移動 (p.276)。
 MY_HOLDINGS = {
     "FMX": {"cost": 133.48, "date": "2026-11-11"},
     "TEVA": {"cost": 44.21, "date": "2026-11-12"},
@@ -166,7 +166,6 @@ def get_entire_market_universe():
         except Exception:
             pass
 
-    # 持股一定要在下載名單內
     for sym in MY_HOLDINGS:
         if sym not in tw_dict and sym not in us_dict:
             us_dict[sym] = sym
@@ -239,16 +238,30 @@ def get_eps_and_surprise_info(symbol):
 # ==========================================
 # 5. 📦 持股守護雷達 (p.272 / p.276)
 # ==========================================
-def holding_stop_price(h):
+def holding_stop_price(df, h):
+    cost = float(h["cost"])
     if h.get("stop"):
-        return float(h["stop"])
-    return float(h["cost"]) * (1 - MAX_STOP_PCT / 100.0)
+        sp = float(h["stop"])
+        return sp, (cost - sp) / cost * 100.0
+
+    # 未手動指定 stop 時，取進場日之 2xATR (夾在 MIN_STOP_PCT ~ MAX_STOP_PCT) 固定於成本下方
+    prev_c = df['Close'].shift(1)
+    tr = pd.concat([df['High'] - df['Low'], (df['High'] - prev_c).abs(), (df['Low'] - prev_c).abs()], axis=1).max(axis=1)
+    atr20 = tr.rolling(20).mean()
+    atr_val = float(atr20.iloc[-1])
+    if h.get("date"):
+        sub = atr20[df.index <= pd.Timestamp(h["date"])].dropna()
+        if len(sub) > 0:
+            atr_val = float(sub.iloc[-1])
+
+    stop_pct = float(np.clip((2.0 * atr_val / cost) * 100.0, MIN_STOP_PCT, MAX_STOP_PCT))
+    return cost * (1.0 - stop_pct / 100.0), stop_pct
 
 
 def check_my_holdings(raw_data):
     if not MY_HOLDINGS:
         return ""
-    lines = ["📦 <b>【持股守護雷達】</b> <i>停損依成本固定，不隨現價移動</i>"]
+    lines = ["📦 <b>【持股守護雷達】</b> <i>停損依進場成本與2xATR固定，不隨現價移動</i>"]
     for sym, h in MY_HOLDINGS.items():
         try:
             if not isinstance(h, dict):
@@ -265,7 +278,7 @@ def check_my_holdings(raw_data):
 
             c_now = float(df['Close'].iloc[-1])
             ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
-            stop = holding_stop_price(h)
+            stop, stop_pct = holding_stop_price(df, h)
             pnl = (c_now - cost) / cost * 100.0
 
             touched = False
@@ -275,7 +288,7 @@ def check_my_holdings(raw_data):
                     touched = float(since['Low'].min()) <= stop
 
             if c_now <= stop:
-                advice = f"🚨 <b>收盤跌破停損 {stop:.2f}，依計畫出場</b>"
+                advice = f"🚨 <b>收盤跌破停損 {stop:.2f} (-{stop_pct:.1f}%)，依計畫出場</b>"
             elif touched:
                 advice = f"🚨 <b>進場後盤中曾觸及停損 {stop:.2f}</b>，若未出場請檢查"
             elif c_now < ma20:
@@ -291,7 +304,7 @@ def check_my_holdings(raw_data):
 
 
 # ==========================================
-# 6. VCP 技術面足跡 (真實波段高低點，不是固定區間)
+# 6. VCP 技術面足跡 (100% 採用 Claude 原版波段轉折演算法)
 # ==========================================
 def zigzag_pivots(h, l, thr):
     """從底部左側高點 (index 0) 開始，找出交替的波段高/低點。
@@ -607,7 +620,7 @@ def analyze_market_minervini(stock_dict):
 
             stop_pct = float(np.clip(2 * atr_pct[-1] * 100.0, MIN_STOP_PCT, MAX_STOP_PCT))
 
-            # ---------- p.298 強勁表現型態（不需通過趨勢樣板的基本面/長均線條件）----------
+            # ---------- p.298 強勁表現型態 ----------
             pp = detect_power_play(h, l, c, v, n)
             if pp and c_now > ma50[-1] and c_now <= pp["pivot"] * (1 + CHASE_LIMIT_PCT / 100):
                 state = "🚀突破" if (c_now > pp["pivot"] and vol_ratio >= BREAKOUT_VOL_MULT) else "等突破"
