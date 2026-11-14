@@ -32,6 +32,14 @@
   資料來自 Yahoo 的歷次財報公布日與當時公布的 EPS，所以不會用到訊號之後才公布的財報。
   營收與利潤率拿不到歷史資料，這一題只驗證 EPS。台股的歷史 EPS 不齊，不測。
 
+第 4 題：買進之後照《超級績效 2》的規則處理（規則在看結果之前就定好，不事後調整）：
+  (1) 起始停損同前（危險點下方，上限 8%）。
+  (2) 漲到停損幅度的 3 倍：賣掉一半，剩下一半的停損移到成本價（②p.89-91、p.138-141、p.246 免費參賽）。
+  (3) 50 日線升到成本價之上以後，收盤跌破 50 日線 → 隔天開盤賣出（②p.245-246）。
+  (4) 最久抱 120 個交易日（書上沒有這個數字，是為了讓每筆交易都有結束）。
+  另外單獨測一條：買進後 10 天內收盤跌破 20 日線就先走（②p.51-52 說這時成功率減半）。
+  「順不順」：最近 10 筆已經結束的同類交易有一半以上賺錢＝順（②p.83、p.133-136 由小而大）。
+
 限制（解讀時要記得）：
   ・股票池是「現在」還上市、而且現在成交量夠大的股票 → 已下市的不在裡面，整體報酬會偏樂觀；
     但各組用的是同一批股票，組與組之間的比較仍有意義。
@@ -69,6 +77,11 @@ BASELINE_EVERY = 5           # 對照組：每檔股票每 5 個交易日取樣�
 DEDUP_BARS = 10              # 同一檔股票在同一組內，10 個交易日內的重複訊號只算第一次
 MIN_N = 30                   # 筆數少於這個數字就標示「樣本太少」
 BUY_STOP_SLIP_PCT = 0.1      # 預先掛單（觸價買進）的滑價假設
+BOOK_BE_MULT = 3.0           # 漲到停損幅度的幾倍：賣一半、其餘停損移到成本（②p.89-91、p.246）
+BOOK_MAX_HOLD = 120          # 自訂：最久抱幾個交易日
+BOOK_EARLY_BARS = 10         # 另一組規則：買進後幾天內收盤跌破 20 日線就先走（②p.51-52）
+FEEDBACK_N = 10              # 「順不順」看最近幾筆已結束的交易
+QUARTER = 0.25               # 不順時只下 1/4（②p.133）
 EPS_LIMIT = 60               # 每檔抓幾筆財報公布紀錄
 EPS_WORKERS = 4              # 同時抓幾檔（太多會被 Yahoo 擋）
 EPS_BUDGET_SEC = 1500        # 抓財報最多花多久；超過就用已經抓到的繼續
@@ -405,8 +418,10 @@ def prep(sym, df, rs_tab, indices, regimes):
         dn40 = pd.Series((big & (d < 0)).astype(float)).rolling(40).sum().values
         heavy_down = (c < pc * 0.985) & (vol_ratio >= 1.35)
         more_down = dn40 > up40 + 1
+    hma20 = pd.Series(c).rolling(20).mean().values       # 用連續化價格算的均線：出場規則拿它和連續化收盤價比
+    hma50 = pd.Series(c).rolling(50).mean().values
     return dict(sym=sym, mkt=mkt, cfg=cfg, n=n, dates=df.index, rc=rc, v=v, v50=v50, o=o, h=h, l=l, c=c, warn=warn,
-                ma20=ma20, ma50=ma50, atr_pct=atr_pct, rs=rs, m=m, reg=reg, liquid=liquid, pinned=pinned,
+                ma20=ma20, ma50=ma50, hma20=hma20, hma50=hma50, atr_pct=atr_pct, rs=rs, m=m, reg=reg, liquid=liquid, pinned=pinned,
                 template=template, long_ok=long_ok, vol_ratio=vol_ratio, is_red=is_red, locked=locked, vol_ok=vol_ok,
                 heavy_down=heavy_down, more_down=more_down, lim=lim)
 
@@ -526,7 +541,8 @@ def simulate(x, t, cap_pct, ref=None, danger_low=None, flat_stop=None, trigger=N
     o, h, l, c, n = x["o"], x["h"], x["l"], x["c"], x["n"]
     out = {"skip": "", "stop_pct": np.nan, "ret20": np.nan, "raw20": np.nan, "stop20": np.nan, "r20": np.nan,
            "ret60": np.nan, "stop60": np.nan, "hit20": np.nan, "mfe60": np.nan, "idx20": np.nan, "gap_pct": np.nan,
-           "amb": 0.0}
+           "amb": 0.0, "exit20": pd.NaT, "bk_ret": np.nan, "bk_r": np.nan, "bk_days": np.nan, "bk_half": np.nan,
+           "bk_open": np.nan, "bk_why": "", "bk2_ret": np.nan, "bk2_days": np.nan, "bk2_why": ""}
     e = t + 1
     if e >= n:
         out["skip"] = "no_next_bar"
@@ -575,6 +591,14 @@ def simulate(x, t, cap_pct, ref=None, danger_low=None, flat_stop=None, trigger=N
             out["idx20"] = (x["m"][e + HOLD_A - 1] / x["m"][t] - 1) * 100.0   # 同期間大盤
     if np.isfinite(out["ret20"]):
         out["r20"] = out["ret20"] / pct
+        if "dates" in x:                                     # 這筆「抱 20 天」的交易哪一天結束（判斷順不順時要用）
+            out["exit20"] = x["dates"][e + (k_stop if (k_stop is not None and k_stop < HOLD_A) else HOLD_A - 1)]
+        if "hma50" in x:
+            for pre, early in (("bk", False), ("bk2", True)):
+                b = book_exit(x, e, P, sp, cost, early)
+                out[pre + "_ret"], out[pre + "_days"], out[pre + "_why"] = b["ret"], b["days"], b["why"]
+                if not early:
+                    out["bk_r"], out["bk_half"], out["bk_open"] = b["ret"] / pct, b["half"], b["open"]
     # 停損之前（停損當天不算）最高漲到哪裡
     kk = k_stop if k_stop is not None else min(HOLD_B, n - e)
     complete = k_stop is not None or (e + HOLD_B - 1 < n)
@@ -588,6 +612,48 @@ def simulate(x, t, cap_pct, ref=None, danger_low=None, flat_stop=None, trigger=N
     elif complete:
         out["hit20"], out["mfe60"] = 0.0, 0.0
     return out
+
+
+def book_exit(x, e, P, sp, cost, early20=False):
+    """買進之後照書上的規則處理（規則見檔案開頭第 4 題）。e＝進場那根、P＝成交價、sp＝起始停損價。
+    同一根 K 棒裡同時碰到停損與目標價時，一律算停損先到；「收盤跌破均線」是收盤後才知道，所以隔天開盤才賣。
+    回傳 ret（整筆報酬 %，已扣成本）、days（抱幾個交易日）、half（有沒有賣到一半）、open（資料結束時還沒出場）、why。"""
+    o, h, l, c, n = x["o"], x["h"], x["l"], x["c"], x["n"]
+    ma20, ma50 = x["hma20"], x["hma50"]
+    tgt = P + BOOK_BE_MULT * (P - sp)
+    stop, half, r_half, to_be = sp, False, 0.0, False
+    px, why, exit_i, pending = None, "", -1, False
+    last = min(n, e + BOOK_MAX_HOLD)
+    for k in range(e, last):
+        if to_be:
+            stop, to_be = max(stop, P), False                # 前一根賣了一半 → 今天起停損在成本價
+        if l[k] <= stop:
+            px, exit_i = (stop if k == e else min(float(o[k]), stop)), k
+            why = "stop" if stop < P else "breakeven"
+            break
+        if not half and h[k] >= tgt:
+            r_half, half, to_be = (tgt if k == e else max(float(o[k]), tgt)) / P - 1.0, True, True
+        reason = ""
+        if np.isfinite(ma50[k]) and ma50[k] >= P and c[k] < ma50[k]:
+            reason = "ma50"
+        elif early20 and (k - e) < BOOK_EARLY_BARS and np.isfinite(ma20[k]) and c[k] < ma20[k]:
+            reason = "early20"
+        if reason:
+            if k + 1 >= n:
+                pending, exit_i = True, k                    # 賣出訊號出現在資料最後一根 → 還沒真的賣
+            else:
+                px, exit_i, why = float(o[k + 1]), k + 1, reason
+            break
+    is_open = 0.0
+    if px is None:
+        if not pending and last == e + BOOK_MAX_HOLD:
+            exit_i, why = last - 1, "time"
+        else:
+            exit_i, why, is_open = (exit_i if pending else n - 1), "open", 1.0   # 資料到這裡為止還抱著 → 以最後收盤價計
+        px = float(c[exit_i])
+    r_rest = px / P - 1.0
+    ret = (0.5 * r_half + 0.5 * r_rest if half else r_rest) * 100.0 - cost
+    return {"ret": float(ret), "days": float(exit_i - e + 1), "half": 1.0 if half else 0.0, "open": is_open, "why": why}
 
 
 # ==========================================
@@ -1193,6 +1259,132 @@ def build_report3(ev, base, info):
     return "\n".join(L)
 
 
+def stat_line_wl(df, ret="bk_ret", days="bk_days"):
+    """筆數｜平均每筆 ±誤差｜勝率｜賺的平均賺多少｜賠的平均賠多少｜平均抱幾天"""
+    d = df[np.isfinite(df[ret])] if len(df) and ret in df else df.iloc[0:0]
+    n = len(d)
+    if n == 0:
+        return "N=0"
+    r = d[ret].values
+    se = 1.96 * r.std(ddof=1) / np.sqrt(n) if n > 1 else float("nan")
+    win, loss = r[r > 0], r[r <= 0]
+    txt = (f"N={n}｜{r.mean():+.1f}% ±{se:.1f}｜勝率 {len(win) / n * 100:.0f}%｜賺的 " + (f"{win.mean():+.1f}%" if len(win) else "—")
+           + "｜賠的 " + (f"{loss.mean():+.1f}%" if len(loss) else "—"))
+    if days and days in d:
+        txt += f"｜抱 {np.nanmean(d[days].values):.0f} 天"
+    return txt + ("　(樣本太少)" if n < MIN_N else "")
+
+
+def verdict_paired(df, a="bk_ret", b="ret20"):
+    """同一批交易、兩種出場方式的差距（逐筆相減再平均），是不是大到不能用運氣解釋。"""
+    if df.empty or a not in df or b not in df:
+        return "樣本太少，無法判斷"
+    d = (df[a] - df[b]).values
+    d = d[np.isfinite(d)]
+    if len(d) < MIN_N:
+        return "樣本太少，無法判斷"
+    diff, se = d.mean(), d.std(ddof=1) / np.sqrt(len(d))
+    word = "明顯較好" if diff > 2 * se else ("明顯較差" if diff < -2 * se else "差距在誤差範圍內，分不出高下")
+    return f"每筆 {diff:+.1f} 個百分點 → {word}"
+
+
+def feedback_states(df):
+    """每一筆交易出現訊號的那一天，「最近 FEEDBACK_N 筆已經結束的同類交易」是不是有一半以上賺錢。
+    只用當時已經知道結果的交易（以抱 20 天的結果與結束日為準）。good＝順、bad＝不順、start＝筆數還不夠。"""
+    if df.empty:
+        return pd.Series([], dtype=object)
+    d = df.sort_values("date")
+    sig = pd.to_datetime(d["date"]).values.astype("datetime64[ns]")
+    ex = pd.to_datetime(d["exit20"]).values.astype("datetime64[ns]")
+    ok = ~np.isnat(ex)
+    order = np.argsort(ex[ok], kind="stable")
+    ex_sorted, win_sorted = ex[ok][order], (d["ret20"].values[ok] > 0)[order]
+    out = []
+    for day in sig:
+        k = int(np.searchsorted(ex_sorted, day, side="left"))          # 結束日早於訊號日的筆數
+        if k < FEEDBACK_N:
+            out.append("start")
+        else:
+            out.append("good" if int(win_sorted[k - FEEDBACK_N:k].sum()) * 2 >= FEEDBACK_N else "bad")
+    return pd.Series(out, index=d.index)
+
+
+BK_WHY = (("stop", "碰到起始停損"), ("breakeven", "賣半後剩下的打平出場"), ("ma50", "跌破 50 日線"), ("time", f"抱滿 {BOOK_MAX_HOLD} 天"),
+          ("open", "到今天還抱著"))
+
+
+def build_report4(ev, base, info):
+    """第 4 題：買進之後照書上的規則處理。"""
+    mk = lambda df, m: df[df["mkt"] == m] if len(df) else df
+    g = groups(ev)
+    Sg, A, F = g["S"], g["A"], base
+    done = lambda df: df[np.isfinite(df["bk_ret"])] if len(df) and "bk_ret" in df else df.iloc[0:0]
+    Sg, A, F = done(Sg), done(A), done(F)
+    L = []
+    L.append("🧪 <b>【回測 4：買進之後照書上的規則處理】</b>")
+    L.append(f"期間 {info['d0']} ~ {info['d1']}｜台股 {info.get('tw', 0)} 檔、美股 {info.get('us', 0)} 檔")
+    L.append(f"出場規則（跑之前就定好，不看結果調整）：漲到停損幅度的 {BOOK_BE_MULT:.0f} 倍 → 賣一半、其餘停損移到成本價；"
+             f"50 日線升過成本價之後，收盤跌破 50 日線就賣；最久抱 {BOOK_MAX_HOLD} 個交易日。")
+    L.append("")
+    L.append("<b>先看結論（機械判讀，只比平均每筆報酬）</b>")
+    for m in ("us", "tw"):
+        nm = S.MARKET_CFG[m]["name"]
+        L.append(f"・{nm}｜★ 掛單：書上的出場 對比 抱 20 天就賣：{verdict_paired(mk(Sg, m))}")
+        L.append(f"・{nm}｜都用書上的出場：★ 掛單 對比 隨便買過樣板的股票：{verdict(mk(Sg, m), mk(F, m), 'bk_ret')}")
+    L.append("")
+    L.append("<i>每行：筆數｜平均每筆 ±誤差｜勝率｜賺的平均賺多少｜賠的平均賠多少｜平均抱幾天</i>")
+    L.append("<i>書上他自己的數字：勝率約 46~50%、賺的平均 +13~15%、賠的平均 -5~6%</i>")
+    for title, df in (("<b>① ★ 預先掛單、盤中碰到樞紐就買</b>", Sg), ("<b>② 有效突破，隔天開盤才買</b>", A),
+                      ("<b>③ 任何一天買進過樣板的股票</b>", F)):
+        L.append(title)
+        for m in ("us", "tw"):
+            nm = S.MARKET_CFG[m]["name"][0]
+            L.append(f" {nm}｜書上的出場　{stat_line_wl(mk(df, m))}")
+            L.append(f" {nm}｜抱 20 天　　{stat_line_wl(mk(df, m), 'ret20', None)}")
+    if len(Sg) and "f_cls" in Sg:
+        L.append("<b>④ ★ 掛單＋盈餘達標</b>（只有美股，書上的出場）")
+        L.append(f" 美｜{stat_line_wl(Sg[(Sg['mkt'] == 'us') & (Sg['f_cls'] == 'ok')])}")
+    L.append(f"<b>⑤ ★ 掛單，再加一條：買進後 {BOOK_EARLY_BARS} 天內收盤跌破 20 日線就先走</b>")
+    for m in ("us", "tw"):
+        L.append(f" {S.MARKET_CFG[m]['name'][0]}｜{stat_line_wl(mk(Sg, m), 'bk2_ret', 'bk2_days')}")
+    L.append(f"<b>⑥ 順不順</b>（★ 掛單、書上的出場；最近 {FEEDBACK_N} 筆已結束的 ★ 交易有一半以上賺錢＝順）")
+    for m in ("us", "tw"):
+        nm = S.MARKET_CFG[m]["name"][0]
+        sub = mk(Sg, m)
+        if sub.empty or "exit20" not in sub:
+            L.append(f" {nm}｜N=0")
+            continue
+        st = feedback_states(sub)
+        good, bad = sub.loc[st.index[st == "good"]], sub.loc[st.index[st == "bad"]]
+        L.append(f" {nm}｜順的時候出現的訊號　{stat_line_wl(good)}")
+        L.append(f" {nm}｜不順的時候出現的訊號　{stat_line_wl(bad)}")
+        w = st.map({"good": 1.0, "bad": QUARTER, "start": QUARTER}).reindex(sub.index).values
+        r = sub["bk_ret"].values
+        L.append(f" {nm}｜順 對比 不順：{verdict(good, bad, 'bk_ret')}")
+        L.append(f" {nm}｜順的時候下全額、不順只下 1/4 → 每一塊錢平均賺 {np.sum(w * r) / np.sum(w):+.1f}%（一視同仁是 {r.mean():+.1f}%）")
+    if len(Sg):
+        tot = len(Sg)
+        vc = Sg["bk_why"].value_counts()
+        L.append("★ 掛單最後怎麼出場（台美合計）：" + "｜".join(f"{name} {vc.get(k, 0) / tot * 100:.0f}%" for k, name in BK_WHY)
+                 + f"；有賣到一半的 {Sg['bk_half'].mean() * 100:.0f}%")
+    if len(F) and "idx20" in F:
+        ix = []
+        for m in ("us", "tw"):
+            sub = F[(F["mkt"] == m) & np.isfinite(F["idx20"])]
+            if len(sub):
+                ix.append(f"{S.MARKET_CFG[m]['name']} {sub['idx20'].mean():+.1f}%")
+        if ix:
+            L.append("")
+            L.append(f"同期間大盤指數每 {HOLD_A} 天平均：" + "、".join(ix))
+    L.append("")
+    L.append(info.get("check", ""))
+    L.append(info.get("fcheck", ""))
+    es = info.get("eps", {})
+    L.append(f"<i>事件共 {len(ev)} 筆、對照組取樣 {len(base)} 筆；財報 {es.get('ok', 0)} 檔有資料；總耗時 {info.get('secs', 0):.0f} 秒。"
+             "限制：只含現在還上市、成交量夠大的股票；同一根 K 棒同時碰到停損與目標時算停損；過去不代表未來。</i>")
+    return "\n".join(L)
+
+
 def send_file(path, caption):
     url = f"https://api.telegram.org/bot{S.TELEGRAM_TOKEN}/sendDocument"
     try:
@@ -1263,7 +1455,7 @@ def main():
     info["check"] = self_check(raw, indices, stock_dict, meta, uni_info)
     info["fcheck"] = fund_self_check(raw, eps_data)
     info["secs"] = time.time() - t0
-    report = build_report3(ev, base, info)
+    report = build_report4(ev, base, info)
     print(re.sub(r"<[^>]+>", "", report))
     S.send_telegram_msg(report)
     if save_events(ev, base):
