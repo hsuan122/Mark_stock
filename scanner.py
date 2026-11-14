@@ -228,7 +228,7 @@ def fetch_tw_universe():
             d['px'] = d['Close'].map(_num)
             d['vol'] = d['TradingShares'].map(_num)
             for _, r in d[(d['px'] > 0) & (d['vol'] >= 50000)].iterrows():
-                tw[f"{r['SecuritiesCompanyCode']}.TWO"] = str(r['CompanyName']).strip()
+                tw[f"{r['SecuritiesCompanyCode']}.TWO"] = str(r['CompanyName']).strip().rstrip('*')
         except Exception as e:
             print(f"⚠️ 上櫃清單解析異常: {e}")
     return tw, raw
@@ -505,7 +505,7 @@ def get_fundamentals(symbol, price, tw_rev=None, deep=False):
         tw_yoy = tw_rev.get("yoy") if tw_rev else None
         nm = [(a / b * 100.0) for a, b in zip(ni_q, rev_q) if a is not None and b]
 
-        accel = len(g) >= 3 and all(x is not None for x in g[:3]) and g[0] > g[1] > g[2] and meaningful
+        accel = len(g) >= 3 and all(x is not None for x in g[:3]) and g[0] > g[1] > g[2] and meaningful and g[0] >= EPS_MIN_GROWTH
         decel = len(g) >= 2 and g[0] is not None and g[1] is not None and g[1] >= 40 and g[0] < g[1] * 0.6
         rev_accel = len(rg) >= 3 and all(x is not None for x in rg[:3]) and rg[0] > rg[1] > rg[2]
         margin_up = len(nm) >= 3 and nm[0] > nm[1] > nm[2]
@@ -1088,16 +1088,19 @@ def send_reports(holdings_msg, header, sections):
     if not blocks:
         send_telegram_msg(holdings_msg + header + "\n今天沒有符合條件的標的。")
         return
+    def ents(t):                                        # Telegram 每則最多 100 個格式標記，超過的粗體會失效
+        return t.count("<b>") + t.count("<i>") + t.count("<code>")
+
     pages, cur = [], ""
     for b in blocks:
-        if len(cur) + len(b) + 2 > 3200:
+        if cur and (len(cur) + len(b) + 2 > 3200 or ents(cur) + ents(b) > 85):
             pages.append(cur)
             cur = ""
         cur += b + "\n\n"
     if cur:
         pages.append(cur)
     first_prefix = holdings_msg + header + "\n"
-    if len(first_prefix) + len(pages[0]) > 4000:        # Telegram 單則上限 4096
+    if len(first_prefix) + len(pages[0]) > 4000 or ents(first_prefix) + ents(pages[0]) > 95:
         send_telegram_msg(first_prefix)
         first_prefix = ""
     for i, p in enumerate(pages, 1):
@@ -1197,7 +1200,7 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
     keys = ("brk", "recent", "star", "squat", "cheat", "power", "primary", "pb")
     cats = {k: {"tw": [], "us": []} for k in keys}
     momentum = []
-    stats = {"scanned": len(raw_data), "liquid": 0, "template": 0}
+    stats = defaultdict(int, {"scanned": len(raw_data)})
     nh, nl = defaultdict(int), defaultdict(int)
     grp_total = {"tw": defaultdict(int), "us": defaultdict(int)}
     grp_pass = {"tw": defaultdict(list), "us": defaultdict(list)}
@@ -1235,6 +1238,9 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
             atr_pct = pd.Series(tr).rolling(20).mean().values / c
 
             c_now, c_prev, o_now, h_now, l_now = c[-1], c[-2], o[-1], h[-1], l[-1]
+            if (h[-10:].max() - l[-10:].min()) / c_now < 0.025 and float((c[-60:] / c[-61:-1]).max()) >= 1.20:
+                stats["pinned"] += 1
+                continue                                   # 自訂：大漲一根後釘在 2.5% 內，多半是已宣布被收購
             rs = rs_map.get(symbol, 50)
             name = stock_dict.get(symbol, symbol)
             flag = "🇹🇼" if is_tw else "🇺🇸"
@@ -1411,6 +1417,14 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
             # ---------- 第三層：截至昨天的底部，今天是否突破 ----------
             fp = analyze_base(h, l, c, v, v50, atr_pct, n - 1, m)
             placed, fail_note = False, ""
+            stats["f1_no_distribution"] += 1
+            if fp:
+                stats["f2_has_base"] += 1
+                if fp["ready"]:
+                    stats["f3_pivot_ready"] += 1
+                    near = -STAR_MAX_DIST <= (c_now / fp["pivot"] - 1) * 100.0 <= CHASE_LIMIT_PCT
+                    stats["f4_ready_near_pivot"] += int(near)
+                    stats["f5_ready_near_dry"] += int(near and fp["dryup"])
             if fp and fp["ready"]:
                 pivot = fp["pivot"]
                 dist = (c_now / pivot - 1) * 100.0
@@ -1532,11 +1546,11 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
     # ---------- 第 6、9 章：領導產業群（由下而上：哪個產業過樣板的家數最多）----------
     grp_rank, grp_line = {}, {}
     for mkt in MARKET_CFG:
-        rows = [(len(lst), ind) for ind, lst in grp_pass[mkt].items() if ind and len(lst) >= 2 and grp_total[mkt][ind] >= 4]
+        rows = [(len(lst) / grp_total[mkt][ind], len(lst), ind) for ind, lst in grp_pass[mkt].items()
+                if ind and len(lst) >= 3 and grp_total[mkt][ind] >= 8]
         rows.sort(reverse=True)
         if rows:
-            grp_line[mkt] = "、".join(f"{html.escape(str(ind))} {cnt}/{grp_total[mkt][ind]}" + (f"(新高{grp_nh[mkt][ind]})" if grp_nh[mkt][ind] else "")
-                                     for cnt, ind in rows[:5])
+            grp_line[mkt] = "、".join(f"{html.escape(str(ind)[:26])} {cnt}/{grp_total[mkt][ind]}" for _, cnt, ind in rows[:5])
         for ind, lst in grp_pass[mkt].items():
             for pos_i, (_, sym) in enumerate(sorted(lst, reverse=True), 1):
                 grp_rank[sym] = (pos_i, len(lst))
@@ -1546,7 +1560,7 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
         bits = []
         if ind and sym in grp_rank:
             pos_i, cnt = grp_rank[sym]
-            bits.append(f"🏭{html.escape(str(ind))}(過樣板{cnt}檔｜群內RS第{pos_i})")
+            bits.append(f"🏭{html.escape(str(ind)[:26])}(過樣板{cnt}檔｜群內RS第{pos_i})")
         if rs_tag:
             bits.append(rs_tag)
         ipo = (meta.get(sym) or {}).get("ipo_year")
@@ -1578,6 +1592,8 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
                 out.append(text + extra_line.get((key, sym), "") + "\n  💰 " + fund_text(f))
         return out
 
+    print("🔎 漏斗：" + "｜".join(f"{k}={stats[k]}" for k in ("scanned", "liquid", "pinned", "template", "f1_no_distribution",
+          "f2_has_base", "f3_pivot_ready", "f4_ready_near_pivot", "f5_ready_near_dry")))
     print("💰 產生日報...")
     sections = [
         ("🚀 <b>【一、今日帶量突破樞紐】</b>", render("brk", True)),
