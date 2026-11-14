@@ -27,10 +27,14 @@
   F 對照組：任何一天買進過趨勢樣板的股票
   G 型態同 A，但沒過趨勢樣板          H 3C 突破停頓區
 
+第 3 題（只有美股）：線型之外再加上基本面——訊號出現「當時已經公布」的最近一季 EPS 年增率是否 ≥ 20%
+  （書上的最低門檻 p.161；判斷方式與 scanner.get_fundamentals 的 meets_min 相同）。
+  資料來自 Yahoo 的歷次財報公布日與當時公布的 EPS，所以不會用到訊號之後才公布的財報。
+  營收與利潤率拿不到歷史資料，這一題只驗證 EPS。台股的歷史 EPS 不齊，不測。
+
 限制（解讀時要記得）：
   ・股票池是「現在」還上市、而且現在成交量夠大的股票 → 已下市的不在裡面，整體報酬會偏樂觀；
     但各組用的是同一批股票，組與組之間的比較仍有意義。
-  ・拿不到「過去某一天當時」的財報，所以只驗證價量規則，不含基本面。
   ・過去有效不代表未來有效。
 本程式只是研究工具，不構成投資建議。
 """
@@ -43,6 +47,7 @@ import contextlib
 import traceback
 import zlib
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
@@ -64,6 +69,10 @@ BASELINE_EVERY = 5           # 對照組：每檔股票每 5 個交易日取樣�
 DEDUP_BARS = 10              # 同一檔股票在同一組內，10 個交易日內的重複訊號只算第一次
 MIN_N = 30                   # 筆數少於這個數字就標示「樣本太少」
 BUY_STOP_SLIP_PCT = 0.1      # 預先掛單（觸價買進）的滑價假設
+EPS_LIMIT = 60               # 每檔抓幾筆財報公布紀錄
+EPS_WORKERS = 4              # 同時抓幾檔（太多會被 Yahoo 擋）
+EPS_BUDGET_SEC = 1500        # 抓財報最多花多久；超過就用已經抓到的繼續
+FUND_CHECK_N = 30            # 基本面自我檢查抽幾檔
 EVENTS_FILE = "backtest_events.zip"       # 裡面是一個 CSV
 DEBUG = os.environ.get("BT_DEBUG", "") == "1"            # 測試用：遇到例外直接丟出，不吞掉
 
@@ -74,30 +83,217 @@ NEUTRAL_FUND = {"line": "", "badges": [], "warn": [], "score": 0, "meets_min": N
 # ==========================================
 # 1. 下載
 # ==========================================
+def _parse_batch(data, batch, raw, splits):
+    n_ok = 0
+    for sym in batch:
+        try:
+            df = S._extract(data, sym, len(batch) == 1)
+            if 'Stock Splits' in df.columns:
+                sp = df['Stock Splits'].dropna()
+                sp = sp[sp > 0]
+                if len(sp):
+                    ix = pd.DatetimeIndex(sp.index)
+                    if ix.tz is not None:
+                        ix = ix.tz_localize(None)
+                    splits[sym] = [(d.normalize(), float(r)) for d, r in zip(ix, sp.values)]
+            cols = [x for x in ['Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume'] if x in df.columns]
+            df = df[cols].dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'])
+            df = df[df['Volume'] > 0]
+            if getattr(df.index, "tz", None) is not None:
+                df.index = df.index.tz_localize(None)
+            if len(df) >= 252:
+                raw[sym] = df
+                n_ok += 1
+        except Exception:
+            continue
+    return n_ok
+
+
 def download_prices(symbols, start_date, batch_size=180):
-    """與 scanner.analyze_market 相同的下載與清理方式；只留下至少 252 根 K 棒的股票。"""
-    raw = {}
+    """與 scanner.analyze_market 相同的下載與清理方式；只留下至少 252 根 K 棒的股票。
+    另外多要「股票分割」紀錄（第 3 題比較 EPS 年增率時要用）；要不到就退回原本的下載方式。回傳 (K 線, 分割紀錄)。"""
+    raw, splits, use_actions = {}, {}, True
     for i in range(0, len(symbols), batch_size):
         batch = symbols[i:i + batch_size]
-        try:
-            data = S.yf.download(batch, start=start_date, auto_adjust=False, group_by="ticker", threads=True, progress=False)
-        except Exception as e:
-            print(f"批次下載略過: {e}")
-            continue
-        for sym in batch:
+        n_ok = 0
+        for attempt in ((True, False) if use_actions else (False,)):
             try:
-                df = S._extract(data, sym, len(batch) == 1)
-                cols = [x for x in ['Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume'] if x in df.columns]
-                df = df[cols].dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'])
-                df = df[df['Volume'] > 0]
-                if getattr(df.index, "tz", None) is not None:
-                    df.index = df.index.tz_localize(None)
-                if len(df) >= 252:
-                    raw[sym] = df
-            except Exception:
-                continue
+                kw = {"actions": True} if attempt else {}
+                data = S.yf.download(batch, start=start_date, auto_adjust=False, group_by="ticker", threads=True, progress=False, **kw)
+                n_ok = _parse_batch(data, batch, raw, splits)
+            except Exception as e:
+                print(f"批次下載略過: {e}")
+                n_ok = 0
+            if n_ok or not attempt:
+                break
+            use_actions = False                          # 帶 actions 抓不到東西 → 之後都用原本的方式
         print(f"  已下載 {min(i + batch_size, len(symbols))}/{len(symbols)}，有效 {len(raw)} 檔")
-    return raw
+    return raw, splits
+
+
+# ==========================================
+# 1b. 歷次財報（第 3 題）：只留「公布日」與「當時公布的 EPS」
+# ==========================================
+def parse_earnings(ed):
+    """yfinance 的財報公布日表格 → (公布日由舊到新, EPS, 驚喜%)；沒有資料回 None。"""
+    if ed is None or not len(ed):
+        return None
+    ecol = next((x for x in ed.columns if "Reported" in str(x)), None)
+    scol = next((x for x in ed.columns if "Surprise" in str(x)), None)
+    if ecol is None:
+        return None
+    rep_ = ed[ed[ecol].notna()]
+    if not len(rep_):
+        return None
+    ix = pd.DatetimeIndex(rep_.index)
+    if ix.tz is not None:
+        ix = ix.tz_localize(None)
+    seen = {}
+    sv = rep_[scol].values if scol is not None else [np.nan] * len(rep_)
+    for d, e, sp in zip(ix.normalize(), rep_[ecol].values, sv):
+        seen.setdefault(d, (float(e), float(sp) if pd.notna(sp) else np.nan))   # 同一天重複的列只留一筆
+    items = sorted(seen.items())
+    return (np.array([k for k, _ in items], dtype="datetime64[D]"), np.array([v[0] for _, v in items], dtype=float),
+            np.array([v[1] for _, v in items], dtype=float))
+
+
+def fetch_eps(symbols):
+    """逐檔抓歷次財報。Yahoo 限流時全部一起暫停、之後放慢；超過時間預算就停，用已經抓到的繼續。回傳 (資料, 統計)。"""
+    t0 = time.time()
+    out, stat = {}, defaultdict(int)
+    throttle = {"pause_until": 0.0, "delay": 0.0}
+
+    def one(sym):
+        err = ""
+        for k in range(4):
+            if time.time() - t0 > EPS_BUDGET_SEC:
+                return sym, None, "budget"
+            wait = throttle["pause_until"] - time.time()
+            if wait > 0:
+                time.sleep(wait)
+            if throttle["delay"]:
+                time.sleep(throttle["delay"])
+            try:
+                return sym, parse_earnings(S.yf.Ticker(sym).get_earnings_dates(limit=EPS_LIMIT)), ""
+            except Exception as e:
+                err = type(e).__name__
+                if "Rate" in err or "429" in str(e) or "Too Many" in str(e):
+                    throttle["pause_until"] = time.time() + 45.0          # 被限流：大家一起停 45 秒
+                    throttle["delay"] = min(2.0, throttle["delay"] + 0.5)   # 之後每次請求多等一下
+                    stat["throttled"] += 1
+                else:
+                    time.sleep(1.0 * (k + 1))
+        return sym, None, err
+
+    with ThreadPoolExecutor(max_workers=EPS_WORKERS) as ex:
+        for i, (sym, hist, err) in enumerate(ex.map(one, symbols), 1):
+            if hist is not None and len(hist[0]) >= 5:
+                out[sym] = hist
+                stat["ok"] += 1
+            elif err == "budget":
+                stat["budget"] += 1
+            elif err:
+                stat["error"] += 1
+                stat["err_" + err] += 1
+            else:
+                stat["empty"] += 1
+            if i % 300 == 0:
+                print(f"  財報 {i}/{len(symbols)}，有資料 {stat['ok']} 檔，{time.time() - t0:.0f} 秒")
+    stat["secs"] = int(time.time() - t0)
+    return out, dict(stat)
+
+
+def adjust_for_splits(hist, splits):
+    """股價已還原分割，但 Yahoo 的歷史 EPS 有沒有還原並不確定 → 逐次分割用「分割前後兩季的 EPS 是否連續」來判斷：
+      看起來沒還原 → 把分割前的 EPS 除以分割比例；看起來已還原 → 不動；分不出來 → 跨越那次分割的年增率不採用。
+    回傳 (調整後的資料, 不採用的日期區間, 統計)。"""
+    dates, eps, surp = hist
+    eps = eps.copy()
+    unknown, stat = [], {"raw": 0, "adj": 0, "amb": 0}
+    for sd, ratio in sorted(splits or []):
+        if not (ratio > 0) or abs(np.log(ratio)) < np.log(1.2):
+            continue                                     # 比例很小（例如 5% 配股）對年增率影響不大
+        i = int(np.searchsorted(dates, np.datetime64(sd, "D"), side="left"))   # 分割後第一次公布
+        if i == 0 or i >= len(dates):
+            continue                                     # 分割前或分割後沒有財報 → 不會拿兩邊互比
+        eb, ea = eps[i - 1], eps[i]
+        verdict = "amb"
+        if eb > 0 and ea > 0:
+            q, lr = np.log(eb / ea), np.log(ratio)
+            if abs(q - lr) + 0.25 < abs(q):
+                verdict = "raw"
+            elif abs(q) + 0.25 < abs(q - lr):
+                verdict = "adj"
+        stat[verdict] += 1
+        if verdict == "raw":
+            eps[:i] = eps[:i] / ratio
+        elif verdict == "amb":
+            end = dates[i + 4] if i + 4 < len(dates) else np.datetime64("2262-01-01", "D")
+            unknown.append((dates[i], end))              # 這段期間「最新一季」和「去年同期」分居分割兩側
+    return (dates, eps, surp), unknown, stat
+
+
+def fund_at(hist, unknown, day, px):
+    """站在 day 這一天收盤後，用「當時已經公布」的財報判斷基本面。判斷方式與 scanner.get_fundamentals 的 meets_min 相同，
+    另外要求資料夠新、季與季之間連續。cls：ok 達標／fail 未達標或虧損／na 無法比較（轉盈、基期太低）／none 沒有可用資料。"""
+    res = {"cls": "none", "g0": np.nan, "accel": False, "beats": 0, "surp0": np.nan}
+    if hist is None:
+        return res
+    dates, eps, surp = hist
+    d = np.datetime64(pd.Timestamp(day).normalize(), "D")
+    n = int(np.searchsorted(dates, d, side="right"))         # 公布日 ≤ 當天的筆數（盤後公布的，隔天開盤前也已經知道）
+    if n < 5:
+        return res
+    if (d - dates[n - 1]).astype(int) > 135:
+        return res                                           # 最新一季太舊：多半是資料中斷
+    gaps = np.diff(dates[max(0, n - 7):n]).astype(int)
+    if (gaps[-4:] < 45).any() or (gaps[-4:] > 135).any():
+        return res                                           # 最近五季不連續
+    for a, b in unknown:
+        if a <= d < b:
+            return res                                       # 分割前後的 EPS 無法確定是否同一基礎
+    e = eps[n - 1::-1]                                       # 由新到舊
+    eps_now, eps_prev = float(e[0]), float(e[4])
+    g = []
+    for k in range(min(3, len(e) - 4)):
+        if k and not (45 <= gaps[-4 - k] <= 135 if len(gaps) >= 4 + k else False):
+            break
+        g.append(None if e[k + 4] <= 0 else float((e[k] - e[k + 4]) / abs(e[k + 4]) * 100.0))
+    g0 = g[0]
+    tiny = bool(px and px > 0 and ((0 <= eps_now / px < 0.001) or (0 < eps_prev / px < 0.0004)))
+    meaningful = g0 is not None and eps_now > 0 and not tiny
+    if eps_now <= 0:
+        res["cls"] = "fail"
+    elif meaningful:
+        res["cls"] = "ok" if g0 >= S.EPS_MIN_GROWTH else "fail"
+    else:
+        res["cls"] = "na"
+    if g0 is not None:
+        res["g0"] = g0
+    res["accel"] = bool(len(g) >= 3 and all(x is not None for x in g) and g[0] > g[1] > g[2] and meaningful and g[0] >= S.EPS_MIN_GROWTH)
+    s_ = surp[n - 1::-1]
+    res["surp0"] = float(s_[0]) if len(s_) else np.nan
+    for x in s_:
+        if np.isnan(x):
+            continue                                         # 與 scanner 相同：沒有數字的季略過
+        if x > 0:
+            res["beats"] += 1
+        else:
+            break
+    return res
+
+
+def add_fundamentals(df, eps_data):
+    """替每一筆訊號補上「當時」的基本面欄位（只有美股有）。eps_data：{代號: (資料, 不採用區間)}。"""
+    if df is None or df.empty:
+        return df
+    cls, g0, accel, beats = [], [], [], []
+    px_col = df["close"].values if "close" in df else np.full(len(df), np.nan)
+    for sym, day, px in zip(df["sym"].values, df["date"].values, px_col):
+        ent = eps_data.get(sym)
+        r = fund_at(ent[0], ent[1], day, px) if ent else {"cls": "none", "g0": np.nan, "accel": False, "beats": 0}
+        cls.append(r["cls"]); g0.append(r["g0"]); accel.append(r["accel"]); beats.append(r["beats"])
+    return df.assign(f_cls=cls, f_g0=g0, f_accel=accel, f_beats=beats)
 
 
 # ==========================================
@@ -496,7 +692,8 @@ def replay_stock(x, events, baseline):
             if t % BASELINE_EVERY == phase:
                 r = simulate(x, t, 0.0, flat_stop=stop_cap(x["reg"][t]))
                 if not r["skip"]:
-                    baseline.append({"mkt": mkt, "sym": sym, "t": t, "date": x["dates"][t], "reg": x["reg"][t], **r})
+                    baseline.append({"mkt": mkt, "sym": sym, "t": t, "date": x["dates"][t], "reg": x["reg"][t],
+                                     "close": float(x["rc"][t]), **r})
             # ---- 名單：樞紐已成型、收盤在樞紐下方 6% 內、守住 20 日線、近 10 日沒有還在進行中的突破 ----
             fp0 = base(t)
             if fp0 and x["rc"][t] >= x["ma20"][t] * 0.99:
@@ -901,6 +1098,101 @@ def build_report(ev, base, info):
     return "\n".join(L)
 
 
+def fund_self_check(raw, eps_data, n=FUND_CHECK_N):
+    """抽幾檔美股：回測對「今天」的基本面判斷，應該和日報的 get_fundamentals（meets_min）一樣。"""
+    try:
+        cand = [x for x in sorted(eps_data) if x in raw and not eps_data[x][2] and len(eps_data[x][0][0]) >= 12]
+        if not cand:
+            return "🔧 基本面自我檢查：沒有可比對的股票"
+        pick = cand[::max(1, len(cand) // n)][:n]
+        same, diff, skip = 0, [], 0
+        want_of = {"ok": True, "fail": False, "na": None}
+        for sym in pick:
+            px = float(raw[sym]['Close'].iloc[-1])
+            mine = fund_at(eps_data[sym][0], eps_data[sym][1], pd.Timestamp.now().normalize(), px)
+            if mine["cls"] == "none":
+                skip += 1
+                continue
+            S._FUND_CACHE.pop((sym, False), None)
+            f = S.get_fundamentals(sym, px)
+            if f.get("line") in ("財報無資料", "", None):
+                skip += 1                                    # 日報這邊這次沒抓到資料，無從比較
+                continue
+            if f.get("meets_min") is want_of[mine["cls"]]:
+                same += 1
+            else:
+                diff.append(f"{sym} 回測={mine['cls']}／日報={f.get('meets_min')}")
+        if not same and not diff:
+            return f"🔧 基本面自我檢查：抽 {len(pick)} 檔都無法比對（資料不足）"
+        if not diff:
+            return f"🔧 基本面自我檢查 ✅ 抽 {same + skip} 檔，可比對的 {same} 檔與日報的判斷全部相同"
+        return f"🔧 基本面自我檢查 ⚠️ {same} 檔相同、{len(diff)} 檔不同，請把這行回報：" + "；".join(diff[:8])
+    except Exception as e:
+        if DEBUG:
+            raise
+        return f"🔧 基本面自我檢查：執行失敗（{type(e).__name__}: {str(e)[:80]}），不影響統計"
+
+
+F_TXT = (("ok", "達標"), ("fail", "未達標（含虧損）"), ("na", "轉盈或基期太低"), ("none", "沒有資料"))
+
+
+def build_report3(ev, base, info):
+    """第 3 題：線型＋盈餘成長（只有美股）。"""
+    us = lambda df: df[df["mkt"] == "us"] if len(df) else df
+    cls = lambda df, k: df[df["f_cls"] == k] if len(df) and "f_cls" in df else df.iloc[0:0]
+    g = groups(ev)
+    F, Sg, A = us(base), us(g["S"]), us(g["A"])
+    L = []
+    L.append("🧪 <b>【回測 3：線型＋盈餘成長（只測美股）】</b>")
+    es = info.get("eps", {})
+    L.append(f"期間 {info['d0']} ~ {info['d1']}｜美股 {info.get('us', 0)} 檔，其中 {es.get('n', 0)} 檔拿得到歷次財報")
+    L.append(f"「盈餘達標」＝訊號出現當時已公布的最近一季 EPS 年增 ≥ {S.EPS_MIN_GROWTH:.0f}%（書上的最低門檻，與日報的判斷相同）。"
+             "買法、停損、持有天數都和前兩題一樣。")
+    L.append("")
+    L.append("<b>先看結論（機械判讀，只比平均報酬）</b>")
+    L.append(f"・過樣板的股票｜盈餘達標 對比 未達標：{verdict(cls(F, 'ok'), cls(F, 'fail'))}")
+    L.append(f"・★ 掛單｜盈餘達標 對比 未達標：{verdict(cls(Sg, 'ok'), cls(Sg, 'fail'))}")
+    L.append(f"・有效突破隔天買｜盈餘達標 對比 未達標：{verdict(cls(A, 'ok'), cls(A, 'fail'))}")
+    L.append(f"・★ 掛單＋盈餘達標 對比 隨便買過樣板的股票：{verdict(cls(Sg, 'ok'), F)}")
+    L.append(f"・有效突破＋盈餘達標 對比 隨便買過樣板的股票：{verdict(cls(A, 'ok'), F)}")
+    L.append("")
+    L.append("<i>每行：筆數｜平均報酬 ±誤差｜賺錢的比例｜碰到停損的比例｜平均每筆賺幾個 R</i>")
+    L.append("<b>① 任何一天買進過樣板的股票</b>")
+    ok = cls(F, "ok")
+    L.append(f" 達標　{stat_line(ok)}")
+    if len(ok):
+        L.append(f" 　└ 其中盈餘連三季加速　{stat_line(ok[ok['f_accel'].astype(bool)])}")
+        L.append(f" 　└ 其中年增 ≥50%　{stat_line(ok[ok['f_g0'] >= 50])}")
+        L.append(f" 　└ 其中連兩季以上超預期　{stat_line(ok[ok['f_beats'] >= 2])}")
+    for k, name in F_TXT[1:]:
+        L.append(f" {name}　{stat_line(cls(F, k))}")
+    for title, df in (("<b>② ★ 預先掛單、盤中碰到樞紐就買</b>", Sg), ("<b>③ 有效突破，隔天開盤才買</b>", A)):
+        L.append(title)
+        for k, name in F_TXT:
+            L.append(f" {name}　{stat_line(cls(df, k))}")
+    L.append("")
+    L.append(f"<b>抱 {HOLD_B} 天：先漲到 +{TARGET_PCT:.0f}% 的比例、碰到停損的比例</b>")
+    for name, df in (("① 過樣板的股票", F), ("② ★ 掛單", Sg), ("③ 有效突破隔天買", A)):
+        L.append(name)
+        L.append(f" 達標　{stat_line60(cls(df, 'ok'))}")
+        L.append(f" 未達標　{stat_line60(cls(df, 'fail'))}")
+    if len(F) and "idx20" in F:
+        sub = F[np.isfinite(F["idx20"])]
+        if len(sub):
+            L.append("")
+            L.append(f"同期間美股大盤指數每 {HOLD_A} 天平均：{sub['idx20'].mean():+.1f}%")
+    L.append("")
+    L.append(info.get("check", ""))
+    L.append(info.get("fcheck", ""))
+    sp = info.get("split", {})
+    L.append(f"<i>財報：{es.get('ok', 0)} 檔有資料、{es.get('empty', 0)} 檔沒有、{es.get('error', 0)} 檔抓取失敗、{es.get('budget', 0)} 檔來不及抓"
+             f"（{es.get('secs', 0)} 秒，被限流 {es.get('throttled', 0)} 次）。期間內的股票分割：EPS 看起來未還原而由程式換算 {sp.get('raw', 0)} 次、已還原 {sp.get('adj', 0)} 次、"
+             f"分不出來而不採用 {sp.get('amb', 0)} 次。</i>")
+    L.append(f"<i>事件共 {len(ev)} 筆、對照組取樣 {len(base)} 筆；總耗時 {info.get('secs', 0):.0f} 秒。"
+             "限制：只驗證 EPS（營收、利潤率沒有歷史資料）；只含現在還上市、成交量夠大的股票；過去不代表未來。</i>")
+    return "\n".join(L)
+
+
 def send_file(path, caption):
     url = f"https://api.telegram.org/bot{S.TELEGRAM_TOKEN}/sendDocument"
     try:
@@ -941,8 +1233,9 @@ def main():
     symbols = list(stock_dict.keys())
     start_date = (pd.Timestamp.now() - pd.DateOffset(months=BT_MONTHS)).strftime('%Y-%m-%d')
     print(f"📥 下載 {len(symbols)} 檔、{BT_MONTHS} 個月的 K 線…")
-    S.send_telegram_msg(f"🧪 回測開始：下載 {len(symbols)} 檔股票 {BT_MONTHS} 個月的 K 線，跑完會再傳結果（通常要幾十分鐘）。")
-    raw = download_prices(symbols, start_date)
+    S.send_telegram_msg(f"🧪 回測開始：下載 {len(symbols)} 檔股票 {BT_MONTHS} 個月的 K 線，這次還要逐檔抓美股的歷次財報，"
+                        f"會比前兩次久（估 15~40 分鐘），跑完會再傳結果。")
+    raw, splits = download_prices(symbols, start_date)
     if len(raw) < 50:
         raise RuntimeError(f"只下載到 {len(raw)} 檔股票的資料，無法回測（可能是 Yahoo 暫時擋住，請稍後再執行一次）")
     indices = S.fetch_indices(start_date)
@@ -954,10 +1247,23 @@ def main():
                                     base["date"] if len(base) else pd.Series(dtype="datetime64[ns]")]))
     info["d0"] = dts.min().strftime("%Y-%m-%d") if len(dts) else "?"
     info["d1"] = dts.max().strftime("%Y-%m-%d") if len(dts) else "?"
+    us_syms = sorted(x for x in raw if S.mkt_of(x) == "us")
+    print(f"📑 抓 {len(us_syms)} 檔美股的歷次財報…")
+    hists, eps_stat = fetch_eps(us_syms)
+    eps_data, split_stat = {}, defaultdict(int)
+    for sym, h in hists.items():
+        h2, unk, st = adjust_for_splits(h, splits.get(sym))
+        eps_data[sym] = (h2, unk, bool(st["raw"] or st["amb"]))
+        for k, v in st.items():
+            split_stat[k] += v
+    ev, base = add_fundamentals(ev, eps_data), add_fundamentals(base, eps_data)
+    info["eps"] = {**eps_stat, "n": len(eps_data)}
+    info["split"] = dict(split_stat)
     print("🔧 自我檢查…")
     info["check"] = self_check(raw, indices, stock_dict, meta, uni_info)
+    info["fcheck"] = fund_self_check(raw, eps_data)
     info["secs"] = time.time() - t0
-    report = build_report(ev, base, info)
+    report = build_report3(ev, base, info)
     print(re.sub(r"<[^>]+>", "", report))
     S.send_telegram_msg(report)
     if save_events(ev, base):
