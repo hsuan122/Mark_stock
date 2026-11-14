@@ -1,5 +1,5 @@
 """
-《超級績效》SEPA / VCP 選股雷達  v3 —— 依全書第 3~13 章校正，台股／美股分流
+《超級績效》SEPA / VCP 選股雷達  v4 —— 依《超級績效》第 3~13 章與《超級績效 2》第 1~10 章校正，台股／美股分流
 
 書中規則對照（頁碼為中譯本）：
   第 3 章  p.54   評等程序：先過趨勢樣板 → 再用盈餘/營收/利潤率/相對強度過濾 → 人工檢視
@@ -13,6 +13,15 @@
            p.279-283 網球行為；p.286-290 3C 杯狀完成騙局；p.295 失敗重設；p.298 強勁表現型態
   第 11 章 p.303-311 新上市股的初選底部
   第 12-13 章 停損不超過 10%、平均 6~7%；漲幅達停損 3 倍時上移到損益兩平；困難環境縮到 5~6%；部位 4~6 檔
+
+《超級績效 2》（頁碼前加 ②）：這本補的是「買進之後」——
+  第 1 章 ②p.42-56  突破後的跟進計數與七項違例；20 日線；蹲下與反轉復甦
+  第 2-3 章 ②p.66-91 停損放在危險點、不依波動放寬；依自己的平均獲利設停損；2~3 倍時上調停損
+  第 4 章 ②p.99-115 交易統計：勝率、平均獲利／虧損、期望值（讀 trades.csv）
+  第 5 章 ②p.143   沒有 10% 獲利緩衝不抱大部位過財報
+  第 6-7 章 ②p.157  趨勢模板補充（RS 線方向）；②p.198-205 3C 與低位作弊
+  第 8 章 ②p.217   部位規模：單筆風險 1.25~2.5%、單一部位 ≤25%
+  第 9 章 ②p.229-252 底部計數；趁強賣（高潮走勢）、趁弱賣；50 日線追蹤；免費參賽
 
 標示「自訂」者不是書中數字，而是為了量化所加的近似條件，可在下方設定區調整。
 本程式只是篩選工具，不構成投資建議。
@@ -41,21 +50,30 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "請換成你的_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "請換成你的_CHAT_ID")
 
 # 📦 持股："代號": {"cost": 成本, "date": "進場日(美股用美東日期)", "stop": 可選，自訂停損價}
-#    未填 "stop" 時，依進場日 2xATR (夾在 3%~8%) 固定於成本下方，不隨現價移動 (p.276)。
+#    未填 "stop" 時沿用原本的算法：進場日 2xATR（夾在 3%~8%）固定於成本下方，不隨現價移動 (p.276)。
+#    註：第二本 p.79 不贊成用波動度決定停損幅度；想照書做，就在 "stop" 直接填你自己的停損價。
+#    賣出後把這一行刪掉，並在 trades.csv 加一行（程式會用它算勝率、平均獲利、平均虧損）。
 MY_HOLDINGS = {
     "FMX": {"cost": 133.48, "date": "2026-11-11"},
     "TEVA": {"cost": 44.21, "date": "2026-11-12"},
 }
 
-# --- 風險 (第 12、13 章) ---
-MAX_STOP_PCT = 8.0            # 建議停損上限（書：平均 6~7%）
-MIN_STOP_PCT = 3.0            # 自訂
-ABS_MAX_STOP_PCT = 10.0       # p.323、p.351：任何情況不超過 10%
-TOUGH_MARKET_STOP_PCT = 6.0   # p.364：困難環境停損縮到 5~6%
-BREAKEVEN_R_MULT = 3.0        # p.360-361：漲幅達起始停損 3 倍 → 停損至少上移到損益兩平
-RISK_PER_TRADE_PCT = 1.0      # 自訂：單筆願意虧掉的總資金 %（書中例子約 0.5~1.25%）
-MAX_POSITION_PCT = 25.0       # p.365：一般 4~6 檔，四檔等量即每檔 25%
+# --- 風險（第一本第 12、13 章；第二本第 2、3、8、9 章。標「②」的頁碼是第二本）---
+MAX_STOP_PCT = 8.0            # 卡片停損上限（書：最大 10%，平均要壓在 6~7%，作者自己約 4~5%）
+MIN_STOP_PCT = 3.0            # 自訂：留給正常波動的最小空間
+STOP_BUFFER_PCT = 0.5         # 自訂：停損放在緊密區低點下方多少 %
+ABS_MAX_STOP_PCT = 10.0       # p.323、p.351、②p.66：任何情況不超過 10%
+TOUGH_MARKET_STOP_PCT = 6.0   # p.364、②p.83：困難環境停損縮到 5~6%
+BREAKEVEN_R_MULT = 3.0        # p.360、②p.90：漲幅達起始停損 3 倍 → 停損至少上移到損益兩平
+FREE_ROLL_R_MULT = 2.0        # ②p.246：漲幅達停損 2~3 倍 → 可賣一半、其餘停損移到成本（免費參賽）
+RISK_PER_TRADE_PCT = 1.25     # ②p.217：單筆風險佔總資金 1.25%~2.5%（經驗少的靠低端）
+MAX_POSITION_PCT = 25.0       # ②p.217：最看好的標的 20~25%；任何情況不超過 50%；持股 4~8 檔
 CHASE_LIMIT_PCT = 5.0         # p.267：不追價
+EARNINGS_WARN_DAYS = 14       # 自訂：財報在幾天內就提醒
+EARNINGS_CUSHION_PCT = 10.0   # ②p.143：帳面獲利不到 10% 就不抱大部位過財報
+FOLLOW_DAYS = 10              # ②p.46：突破後第 1~2 週觀察跟進買盤與違例
+TRADES_FILE = os.environ.get("TRADES_FILE", "trades.csv")   # 已平倉交易紀錄；沒有這個檔就不顯示統計
+TRADE_STATS_MIN_N = 20        # 自訂：累積到這個筆數，才用「平均獲利的一半」限制卡片停損上限（②p.86）
 
 # --- 市場別設定（台股／美股分開）---
 MARKET_CFG = {
@@ -82,9 +100,9 @@ US_CACHE_FILE = os.environ.get("US_UNIVERSE_CACHE", "us_universe_cache.json")
 HISTORY_MONTHS = 36           # 底部計數需要較長歷史
 HEAL_MIN_GAP_PCT = 1.5        # 自訂：除權息缺口大於此幅度才在型態分析中接合（小額配息不動）
 
-# --- 趨勢樣板 (p.106) ---
+# --- 趨勢樣板 (p.106；②p.157) ---
 RS_MIN = 70
-LOW52_MULT = 1.30
+LOW52_MULT = 1.30             # 第一本 30%、第二本 25%，取較嚴的；要照第二本就改成 1.25
 HIGH52_WITHIN = 0.25
 MA200_UP_DAYS = 22
 DAYS_ABOVE_LONG_MA = 15       # 自訂加嚴：近 N 日收盤都在 150/200MA 之上（擋掉年線糾纏股）；設 1 = 只看今天
@@ -93,12 +111,13 @@ MA50_OVER_MA150_PCT = 0.0     # 自訂：書中只要求 50 > 150 > 200
 # --- 底部 / VCP (p.238-253) ---
 BASE_LOOKBACKS = [325, 200, 130, 90, 60, 40]   # 3~65 週
 MIN_BASE_DAYS = 15
-MAX_BASE_DEPTH = 35.0         # p.253：最好 10~35%
+POKE_MAX_PCT = 3.0            # 自訂：近 3 週的新高若只比更早的高點多出這個幅度以內，視為在舊底部上緣試探，底部延續
+MAX_BASE_DEPTH = 35.0         # p.253、②p.178：最好 10~35%
 MAX_BASE_DEPTH_BEAR = 50.0    # p.226、p.253：大盤重挫時可到 50%，再深就太過份
 MIN_BASE_DEPTH = 5.0          # p.277 手寫清單有 5W 5/2、6W 5/2
 SHORT_BASE_DAYS = 25          # 5 週以內的短底部
 SHORT_BASE_MAX_DEPTH = 25.0   # p.311：期間很短時修正不應超過 25%
-REL_DEPTH_WARN = 3.0          # p.252：修正幅度達大盤 2~3 倍以上 → 偏弱
+REL_DEPTH_WARN = 3.0          # p.252、②p.179：修正幅度達大盤 2.5~3 倍以上 → 偏弱
 FINAL_CONTRACTION_MAX = 10.0
 CONTRACTION_RATIO = 0.85      # 自訂：每次收縮 ≤ 前一次 × 此值（書中理想約 0.5）
 FINAL_VS_FIRST = 0.60         # 自訂
@@ -115,7 +134,7 @@ POST_BREAKOUT_DAYS = 10       # p.271：蹲下後有的 10 天或更久才回升
 CHEAT_MIN_DEPTH = 15.0
 CHEAT_MAX_DEPTH = 50.0
 CHEAT_PAUSE_MAX = 10.0        # 停頓區高低幅度 5~10%
-CHEAT_RECOV = (0.25, 0.70)    # 收復跌幅 1/3~1/2（上 1/3 屬一般柄部，交給 VCP）
+CHEAT_RECOV = (0.25, 0.70)    # 收復跌幅 1/3~1/2；下 1/3 是「低位作弊」(②p.202)，上 1/3 屬一般柄部，交給 VCP
 
 # --- 新上市初選底部 (第 11 章) ---
 PRIMARY_MIN_BARS = 45
@@ -439,7 +458,7 @@ def get_fundamentals(symbol, price, tw_rev=None, deep=False):
     key = (symbol, deep)
     if key in _FUND_CACHE:
         return _FUND_CACHE[key]
-    res = {"line": "財報無資料", "badges": [], "warn": [], "score": 0, "meets_min": None, "strong": False}
+    res = {"line": "財報無資料", "badges": [], "warn": [], "score": 0, "meets_min": None, "strong": False, "earn_days": None}
     try:
         tk = yf.Ticker(symbol)
         try:
@@ -452,6 +471,16 @@ def get_fundamentals(symbol, price, tw_rev=None, deep=False):
             ed = tk.get_earnings_dates(limit=16)
             if ed is not None and len(ed):
                 ed = ed.sort_index(ascending=False)
+                try:                                     # 下一次財報日（②p.143）
+                    idx = pd.DatetimeIndex(ed.index)
+                    if idx.tz is not None:
+                        idx = idx.tz_localize(None)
+                    today = pd.Timestamp.now().normalize()
+                    fut = idx[idx.normalize() >= today]
+                    if len(fut):
+                        res["earn_days"] = int((fut.min().normalize() - today).days)
+                except Exception:
+                    pass
                 ecol = next((x for x in ed.columns if "Reported" in str(x)), None)
                 scol = next((x for x in ed.columns if "Surprise" in str(x)), None)
                 if ecol is not None:
@@ -632,13 +661,188 @@ def fund_text(f):
 # 6. 風險工具（第 12、13 章）
 # ==========================================
 def position_pct(stop_pct, mkt):
-    """單筆風險固定為總資金的 RISK_PER_TRADE_PCT；台股因跌停可能出不掉，以至少一根跌停計算。"""
+    """②p.215-217：部位大小由「這筆失敗時總資金會少多少」決定。單筆風險固定為 RISK_PER_TRADE_PCT；
+    台股因跌停可能出不掉，以至少一根跌停計算。"""
     eff = max(stop_pct, MARKET_CFG[mkt]["gap_risk_pct"])
     return min(MAX_POSITION_PCT, RISK_PER_TRADE_PCT / eff * 100.0)
 
 
+def plan_stop(entry, danger_low, cap_pct):
+    """②p.70：停損放在「正常回檔即將變成危險走勢」的位置＝突破前緊密區的低點下方，並讓進場價貼近它；
+    ②p.79：不因為股票波動大就放寬停損（所以不用 ATR 決定幅度）。回傳 (停損價, 距進場價 %, 是否被上限截斷)。"""
+    cap_pct = max(cap_pct, MIN_STOP_PCT)
+    if not danger_low or danger_low <= 0 or danger_low >= entry:
+        raw = MIN_STOP_PCT
+    else:
+        raw = (entry - danger_low * (1 - STOP_BUFFER_PCT / 100.0)) / entry * 100.0
+    pct = float(np.clip(raw, MIN_STOP_PCT, cap_pct))
+    return entry * (1 - pct / 100.0), pct, bool(raw > cap_pct + 1e-9)
+
+
+def follow_through(h, l, c, v, v50, rc, ma20, ma50, e, ref):
+    """②p.42-56：突破（或進場）後的跟進狀況與違例。e = 突破／進場那根 K 棒的位置，ref = 樞紐價或成本，
+    rc = 未還原收盤（跟均線比較用）。回傳 None 或 dict。"""
+    n = len(c)
+    if e is None or e < 1 or e >= n:
+        return None
+    days = n - e                                        # 含突破當天
+    cc, pc = c[e:n], c[e - 1:n - 1]
+    up, dn = int((cc > pc).sum()), int((cc < pc).sum())
+    rng = h[e:n] - l[e:n]
+    pos = np.where(rng > 0, (cc - l[e:n]) / np.where(rng > 0, rng, 1.0), 0.5)
+    hi_half = int((pos >= 0.5).sum())
+    viol = []
+    if days <= FOLLOW_DAYS:
+        vb = float(v50[e - 1]) if np.isfinite(v50[e - 1]) else 0.0
+        if vb > 0 and days >= 2 and v[e] < vb:           # 1 小量突破、大量拉回
+            heavy = v[e + 1:n][cc[1:] < pc[1:]]
+            if len(heavy) and float(heavy.max()) > max(float(v[e]), vb):
+                viol.append("小量突破卻大量拉回")
+        ll, i = 0, n - 1                                 # 2 低點連續 3~4 天更低，且最後一天沒有買盤撐住
+        while i > e and l[i] < l[i - 1]:
+            ll += 1
+            i -= 1
+        if ll >= 3 and pos[-1] < 0.5 and c[-1] <= c[-2]:
+            viol.append(f"連{ll}天低點更低")
+        if days >= 4 and dn > up:                        # 3
+            viol.append("收低多於收高")
+        if days >= 4 and (days - hi_half) > hi_half:     # 4
+            viol.append("多收在K棒下半部")
+    if np.isfinite(ma20[-1]) and rc[-1] < ma20[-1]:      # 5
+        viol.append("收盤跌破20MA")
+    if np.isfinite(ma50[-1]) and rc[-1] < ma50[-1]:      # 6 帶量跌破 50MA
+        for j in range(max(e, 1), n):
+            if np.isfinite(ma50[j]) and rc[j] < ma50[j] and v50[j - 1] > 0 and v[j] >= 1.5 * v50[j - 1]:
+                viol.append("帶量跌破50MA")
+                break
+    if ref and float(h[e:n].max()) >= ref * 1.08 and c[-1] <= ref * 1.005:   # 7（8% 為自訂的「明顯上漲」）
+        viol.append("漲幅完全折返")
+    upv, dnv = v[e:n][cc > pc], v[e:n][cc < pc]
+    pull = float(dnv.mean() / upv.mean()) if (len(upv) and len(dnv) and upv.mean() > 0) else None
+    return {"days": days, "up": up, "dn": dn, "hi_half": hi_half, "viol": viol, "pull": pull,
+            "strong": bool(days >= 4 and up >= 0.75 * days)}
+
+
+def strength_flags(h, l, c, v):
+    """②p.235-241 高潮走勢的徵兆、②p.48 MVP。只描述現象；是初期的強勢還是後期的竭盡，由呼叫端依底部計數判斷。"""
+    n = len(c)
+    if n < 70:
+        return None
+    best, bk = -1e9, 5
+    for k in range(5, 16):                               # 1~3 週內的最大漲幅
+        g = (c[-1] / c[-1 - k] - 1) * 100.0
+        if g > best:
+            best, bk = g, k
+    ups = {w: int((c[-w:] > c[-w - 1:-1]).sum()) for w in (8, 10, 15)}
+    wr = next((w for w in (15, 10, 8) if ups[w] / w >= 0.7), None)      # 7~15 天內 70% 以上的天數收高
+    lb = min(250, n - 2)
+    chg = c[1:] / c[:-1] - 1
+    i_up = n - lb + int(np.argmax(chg[-lb:]))            # 一年來漲幅最大的 K 棒
+    spread = (h[1:] - l[1:]) / c[:-1]
+    i_sp = n - lb + int(np.argmax(spread[-lb:]))         # 一年來最長的 K 棒
+    gap = bool((l[-5:] > h[-6:-1]).any())                # 近 5 日向上跳空
+    vprev = float(v[-65:-15].mean())
+    g15 = (c[-1] / c[-16] - 1) * 100.0
+    mvp = bool(ups[15] >= 12 and g15 >= 20.0 and vprev > 0 and float(v[-15:].mean()) >= 1.25 * vprev)
+    return {"climax": bool(best >= 25.0 or (wr is not None and best >= 15.0)), "best": float(best), "bk": bk,
+            "ups": ups, "wr": wr, "big_up": (n - 1 - i_up) < 5, "wide": (n - 1 - i_sp) < 5, "gap": gap, "mvp": mvp}
+
+
+def load_trade_stats(path=None):
+    """②第 4 章：用自己的交易結果算勝率、平均獲利、平均虧損、期望值。
+    trades.csv 欄位：symbol,buy_date,buy_price,sell_date,sell_price,stop_price(可空),note(可空)。台股自動扣手續費與證交稅。"""
+    path = path or TRADES_FILE
+    if not os.path.exists(path):
+        return None
+    t = None
+    for enc in ("utf-8-sig", "cp950"):                   # Excel 存的 CSV 可能帶 BOM 或是 Big5
+        try:
+            t = pd.read_csv(path, comment="#", skip_blank_lines=True, dtype=str, encoding=enc)
+            break
+        except Exception as e:
+            err = e
+    if t is None:
+        print(f"⚠️ {path} 讀取失敗：{err}")
+        return None
+    cols = {str(x).strip().lower(): x for x in t.columns}
+    need = ("symbol", "buy_date", "buy_price", "sell_date", "sell_price")
+    if any(k not in cols for k in need):
+        print(f"⚠️ {path} 缺少欄位，需要 {', '.join(need)}；實際是 {list(t.columns)}")
+        return None
+    rets, days, rmult, bad = [], [], [], 0
+    for _, r in t.iterrows():
+        try:
+            if r.isna().all():
+                continue                                  # 空白列
+            sym = str(r[cols["symbol"]]).strip()
+            bp, sp = _num(r[cols["buy_price"]]), _num(r[cols["sell_price"]])
+            bd = pd.to_datetime(r[cols["buy_date"]], errors="coerce")
+            sd = pd.to_datetime(r[cols["sell_date"]], errors="coerce")
+            if not sym or sym.lower() == "nan" or not bp or not sp or bp <= 0 or sp <= 0 or pd.isna(bd) or pd.isna(sd):
+                bad += 1
+                continue
+            cfg = MARKET_CFG[mkt_of(sym)]
+            rets.append((sp / bp - 1) * 100.0 - cfg["cost_buy_pct"] - cfg["cost_sell_pct"])
+            days.append(max(0, int((sd - bd).days)))
+            st = _num(r[cols["stop_price"]]) if "stop_price" in cols else None
+            rmult.append((sp - bp) / (bp - st) if (st and 0 < st < bp) else None)
+        except Exception:
+            bad += 1
+    if bad:
+        print(f"⚠️ {path} 有 {bad} 列無法解讀，已略過")
+    if not rets:
+        return None
+    rets, days = np.array(rets), np.array(days)
+    win = rets > 0
+    nw, nl = int(win.sum()), int((~win).sum())
+    avg_gain = float(rets[win].mean()) if nw else 0.0
+    avg_loss = float(-rets[~win].mean()) if nl else 0.0
+    wr = nw / len(rets)
+    rm = [x for x in rmult if x is not None]
+    return {
+        "n": len(rets), "win_rate": wr, "avg_gain": avg_gain, "avg_loss": avg_loss,
+        "ratio": (avg_gain / avg_loss) if avg_loss > 0 and nw else None,
+        "expectancy": wr * avg_gain - (1 - wr) * avg_loss,
+        "max_gain": float(rets.max()), "max_loss": float(rets.min()),
+        "hold_win": float(days[win].mean()) if nw else None, "hold_loss": float(days[~win].mean()) if nl else None,
+        "over10": int((rets < -ABS_MAX_STOP_PCT).sum()), "avg_r": (float(np.mean(rm)) if rm else None),
+    }
+
+
+def trade_stats_text(st, rba_cap=None):
+    if not st:
+        return ""
+    n = st["n"]
+    s = f"📒 <b>【交易統計】</b> {n} 筆已平倉" + ("（樣本少，僅供記錄）" if n < TRADE_STATS_MIN_N else "") + "\n"
+    s += f"勝率 {st['win_rate'] * 100:.0f}%｜平均獲利 +{st['avg_gain']:.1f}%｜平均虧損 -{st['avg_loss']:.1f}%"
+    if st["ratio"] is not None:
+        s += f"｜盈虧比 {st['ratio']:.1f}"
+    s += f"\n期望值 {st['expectancy']:+.2f}%/筆｜最大獲利 {st['max_gain']:+.1f}%｜最大虧損 {st['max_loss']:+.1f}%"
+    if st["avg_r"] is not None:
+        s += f"｜平均 {st['avg_r']:+.2f}R"
+    if st["hold_win"] is not None and st["hold_loss"] is not None:
+        s += f"\n平均持有：獲利 {st['hold_win']:.0f} 天／虧損 {st['hold_loss']:.0f} 天"
+    flags = []
+    if n >= 5:
+        if st["over10"]:
+            flags.append(f"有 {st['over10']} 筆虧損超過 {ABS_MAX_STOP_PCT:.0f}%（②p.107：不該越過的牆）")
+        if st["max_gain"] > 0 > st["max_loss"] and st["max_gain"] < -st["max_loss"]:
+            flags.append("最大獲利小於最大虧損（②p.105：虧損抱太久）")
+        if st["hold_win"] is not None and st["hold_loss"] is not None and st["hold_win"] < st["hold_loss"]:
+            flags.append("虧損部位抱得比獲利部位久（②p.105：太早賣贏家、太晚砍輸家）")
+        if st["avg_gain"] > 0 and st["avg_loss"] > st["avg_gain"] / 2:
+            flags.append(f"平均虧損高於平均獲利的一半；照你的平均獲利，停損應在 {st['avg_gain'] / 2:.1f}% 以內（②p.86）")
+        if st["expectancy"] <= 0:
+            flags.append("期望值為負")
+    for fl in flags:
+        s += f"\n⚠️ {fl}"
+    if rba_cap is not None:
+        s += f"\n→ 卡片停損上限已依「平均獲利的一半」改為 {rba_cap:.1f}%（②p.86）"
+    return s + "\n" + ("─" * 18) + "\n\n"
+
+
 def stage3_flags(c, v, v50, recent=10, lookback=250):
-    """p.100、p.112-121：出現「一年來最大單日（或單週）跌幅且帶大量」是第三階段警訊。回傳警訊文字或 None。"""
+    """p.100、p.112-121、②p.242：出現「一年來最大單日（或單週）跌幅且帶大量」是第三階段／趁弱賣出的訊號。回傳文字或 None。"""
     n = len(c)
     lb = min(lookback, n - 7)
     if lb < 60:
@@ -651,6 +855,10 @@ def stage3_flags(c, v, v50, recent=10, lookback=250):
     i5 = n - lb + int(np.argmin(d5[-lb:]))
     if (n - 1 - i5) < recent and d5[i5 - 5] <= -0.08 and v50[i5 - 5] > 0 and v[i5 - 4:i5 + 1].mean() >= 1.3 * v50[i5 - 5]:
         return f"近期出現一年來最大單週跌幅 {d5[i5 - 5] * 100:.1f}% 且帶量"
+    # ②p.244：跌幅不一定最大，但成交量是一年來最大、而且收跌 4% 以上，同樣是賣出訊號
+    iv = n - lb + int(np.argmax(v[-lb:]))
+    if (n - 1 - iv) < recent and iv >= 1 and c[iv] <= c[iv - 1] * 0.96:
+        return f"{n - 1 - iv}天前出現一年來最大量且收跌 {(1 - c[iv] / c[iv - 1]) * 100:.1f}%"
     return None
 
 
@@ -675,38 +883,44 @@ def check_my_holdings(raw_data):
     if not MY_HOLDINGS:
         return ""
     lines = ["📦 <b>【持股守護雷達】</b> <i>停損固定於成本下方，不隨現價移動</i>"]
-    for sym, h in MY_HOLDINGS.items():
+    for sym, hd in MY_HOLDINGS.items():
         try:
-            if not isinstance(h, dict):
-                h = {"cost": float(h)}
-            cost = float(h["cost"])
+            if not isinstance(hd, dict):
+                hd = {"cost": float(hd)}
+            cost = float(hd["cost"])
             mkt = mkt_of(sym)
             cfg = MARKET_CFG[mkt]
             df = raw_data.get(sym)
             if df is None or len(df) < 30:
-                df = yf.Ticker(sym).history(period="1y", auto_adjust=False)
+                df = yf.Ticker(sym).history(period="2y", auto_adjust=False)
                 if df is not None and len(df) and getattr(df.index, "tz", None) is not None:
                     df.index = df.index.tz_localize(None)
             if df is None or len(df) < 25:
                 lines.append(f"• <b>{sym}</b>｜⚠️ 抓不到報價，請手動檢查")
                 continue
 
-            c = df['Close'].values.astype(float)
+            n = len(df)
+            _, h, l, c, _, _ = heal_series(df, mkt == "tw")
+            rc = df['Close'].values.astype(float)
             v = df['Volume'].values.astype(float)
-            c_now = float(c[-1])
-            ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
-            stop, stop_pct = holding_stop_price(df, h)
+            v50 = df['Volume'].rolling(50).mean().values
+            ma20s = df['Close'].rolling(20).mean().values
+            ma50s = df['Close'].rolling(50).mean().values
+            c_now, ma20, ma50 = float(rc[-1]), float(ma20s[-1]), float(ma50s[-1])
+            stop, stop_pct = holding_stop_price(df, hd)
             pnl = (c_now - cost) / cost * 100.0
             fee = cfg["cost_buy_pct"] + cfg["cost_sell_pct"]
             breakeven = cost * (1 + fee / 100.0)
 
-            touched, r_max = False, None
-            if h.get("date"):
-                since = df[df.index >= pd.Timestamp(h["date"])]
-                if len(since):
-                    touched = float(since['Low'].min()) <= stop
+            e, touched, r_max = None, False, None
+            if hd.get("date"):
+                idx = np.where(df.index >= pd.Timestamp(hd["date"]))[0]
+                if len(idx):
+                    e = int(idx[0])
+                    touched = float(df['Low'].values[e:].min()) <= stop
                     if cost > stop:
-                        r_max = (float(since['High'].max()) - cost) / (cost - stop)
+                        r_max = (float(df['High'].values[e:].max()) - cost) / (cost - stop)
+            r_now = (c_now - cost) / (cost - stop) if cost > stop else None
 
             if c_now <= stop:
                 advice = f"🚨 <b>收盤跌破停損 {stop:.2f} (-{stop_pct:.1f}%)，依計畫出場</b>"
@@ -719,28 +933,87 @@ def check_my_holdings(raw_data):
 
             notes = []
             if stop_pct > ABS_MAX_STOP_PCT:
-                notes.append(f"停損幅度 {stop_pct:.1f}% 超過書中上限 {ABS_MAX_STOP_PCT:.0f}% (p.351)")
-            if r_max is not None and r_max >= BREAKEVEN_R_MULT and stop < breakeven:
-                notes.append(f"漲幅已達停損的 {r_max:.1f} 倍 → 書中做法是把停損上移到損益兩平 {breakeven:.2f} (p.361)")
-            if len(c) > 80:
-                v50 = df['Volume'].rolling(50).mean().values
+                notes.append(f"⚠️ 停損幅度 {stop_pct:.1f}% 超過書中上限 {ABS_MAX_STOP_PCT:.0f}% (p.351)")
+            if cfg["limit_pct"] and n > 1:
+                chg = (c_now / rc[-2] - 1) * 100
+                if chg <= -(cfg["limit_pct"] - 0.7) and abs(float(df['Low'].iloc[-1]) - c_now) < 1e-9:
+                    notes.append("⚠️ 今日跌停鎖住，停損單可能無法成交")
+            if n > 80:
                 s3 = stage3_flags(c, v, v50)
                 if s3:
-                    notes.append(f"{s3} (p.100 第三階段警訊)")
-            if cfg["limit_pct"] and len(c) > 1:
-                chg = (c_now / c[-2] - 1) * 100
-                if chg <= -(cfg["limit_pct"] - 0.7) and abs(float(df['Low'].iloc[-1]) - c_now) < 1e-9:
-                    notes.append("今日跌停鎖住，停損單可能無法成交")
+                    notes.append(f"⚠️ {s3}（書中視為趁弱賣出訊號 p.100、②p.242）")
+
+            # ②p.42-56：進場後第 1~2 週的跟進買盤與違例
+            ft = follow_through(h, l, c, v, v50, rc, ma20s, ma50s, e, cost)
+            if ft:
+                if ft["days"] <= FOLLOW_DAYS:
+                    q = "，跟進強" if ft["strong"] else ("，跟進弱" if (ft["days"] >= 4 and ft["dn"] > ft["up"]) else "")
+                    notes.append(f"進場後 {ft['days']} 天：{ft['up']} 漲 {ft['dn']} 跌・收在K棒上半部 {ft['hi_half']}/{ft['days']}{q}"
+                                 f"（書中希望 4 天有 3 天收高 ②p.47）")
+                # 進場兩週內列出全部違例；之後只在出現「跌破 20MA」以外的項目時才提（20MA 已寫在上一行）
+                vio = ft["viol"] if ft["days"] <= FOLLOW_DAYS else ([] if ft["viol"] == ["收盤跌破20MA"] else ft["viol"])
+                if vio:
+                    notes.append(f"⚠️ 違例 {len(vio)} 項：{'、'.join(vio)}（②p.56：違例越多越容易失敗，可在停損前先減碼）")
+
+            # ②p.89-91、p.245-247：獲利後如何上調停損（只提示，不會改你的停損）
+            if r_max is not None and stop < breakeven:
+                if r_max >= BREAKEVEN_R_MULT:
+                    notes.append(f"漲幅曾達停損的 {r_max:.1f} 倍 → 書中做法是把停損至少上移到損益兩平 {breakeven:.2f}（p.361、②p.90）")
+                elif r_max >= FREE_ROLL_R_MULT:
+                    notes.append(f"漲幅曾達停損的 {r_max:.1f} 倍 → 書中做法：賣一半、其餘停損移到成本 {breakeven:.2f}（免費參賽 ②p.246）")
+            if np.isfinite(ma50) and pnl > 0 and ma50 >= breakeven and c_now > ma50 > stop:
+                notes.append(f"50 日線 {ma50:.2f} 已高於成本 → 可改用「收盤跌破 50 日線」當出場點（②p.245）")
+
+            # ②p.235-252：急漲是續抱還是該趁強賣，取決於處在初期還是後期
+            if n > 80 and pnl > 0:
+                sf = strength_flags(h, l, c, v)
+                if sf and (sf["climax"] or sf["mvp"]):
+                    nb, nb_known = (None, False)
+                    if n >= 260:
+                        nb, nb_known = count_bases(c, rc, df['Close'].rolling(200).mean().values)
+                    held = (n - e) if e is not None else None
+                    desc = f"近 {sf['bk']} 天漲 {sf['best']:.0f}%"
+                    if sf["wr"]:
+                        desc += f"・{sf['wr']} 天中 {sf['ups'][sf['wr']]} 天收高"
+                    if sf["big_up"]:
+                        desc += "・出現一年來最大漲幅K棒"
+                    if sf["gap"]:
+                        desc += "・向上跳空"
+                    if nb is not None and nb >= 4:
+                        desc += f" → 已是第 {nb} 個底部以後，書中做法是趁強勢至少賣出一部分（②p.239）"
+                    elif (held is not None and held <= 20) or (nb_known and nb is not None and nb <= 2):
+                        desc += " → 初期底部突破後的強勢，書中視為續抱訊號（②p.49、p.249）"
+                    else:
+                        desc += " → 若已到後期是趁強賣出訊號，初期底部則續抱（②p.239、p.249）"
+                    notes.append("⚡ " + desc)
+
+            # ②p.143：財報前沒有獲利緩衝就不抱大部位
+            try:
+                ed = get_fundamentals(sym, c_now).get("earn_days")
+            except Exception:
+                ed = None
+            if ed is not None and 0 <= ed <= EARNINGS_WARN_DAYS:
+                when = "今天" if ed == 0 else f"約 {ed} 天後"
+                if pnl < EARNINGS_CUSHION_PCT:
+                    notes.append(f"📅 財報{when}，帳面獲利不到 {EARNINGS_CUSHION_PCT:.0f}% → 書中做法是減碼或不抱過財報（②p.143）")
+                else:
+                    notes.append(f"📅 財報{when}")
 
             icon = "🟢" if pnl >= 0 else "🔻"
             net = f"｜扣稅費 {pnl - fee:+.1f}%" if fee > 0 else ""
-            line = f"• <b>{sym}</b>｜現價 <b>{c_now:.2f}</b> (成本 {cost:.2f}｜{icon} <b>{pnl:+.1f}%</b>{net})\n  └ {advice}"
-            for nt in notes:
-                line += f"\n  └ ⚠️ {nt}"
+            r_txt = f"｜{r_now:+.1f}R" if r_now is not None else ""
+            line = f"• <b>{sym}</b>｜現價 <b>{c_now:.2f}</b> (成本 {cost:.2f}｜{icon} <b>{pnl:+.1f}%</b>{net}{r_txt})\n  └ {advice}"
+            for nt in notes[:6]:
+                line += f"\n  └ {nt}"
             lines.append(line)
         except Exception as e:
             lines.append(f"• <b>{sym}</b>｜⚠️ 檢查失敗: {html.escape(str(e))[:60]}")
     return "\n".join(lines) + "\n" + ("─" * 18) + "\n\n"
+
+
+NR_TXT = {"compressed": "右側時間壓縮", "one_contraction": "只有一次收縮", "too_many_swings": "波段太多",
+          "not_contracting": "收縮沒有逐次變小", "final_not_smallest": "最後一次不是最小", "final_too_wide": "最後一次收縮超過10%",
+          "final_vs_first": "最後一次相對第一次不夠小", "lower_half": "樞紐在底部下半部", "pivot_too_new": "樞紐高點太新", "other": "其他"}
 
 
 # ==========================================
@@ -793,16 +1066,29 @@ def analyze_base(h, l, c, v, v50, atr_pct, end, m=None):
         return None
     last = end - 1
 
-    p0, mkt_dd = None, None
+    p0, mkt_dd, poke = None, None, False
     for lb in BASE_LOOKBACKS:
         start = max(0, end - lb)
         seg = h[start:end]
         rel = len(seg) - 1 - int(np.argmax(seg[::-1]))
         cand = start + rel
         days = last - cand
+        is_poke = False
         if days < MIN_BASE_DAYS:
-            _BASE_REJECT = "recent_high"
-            return None                                   # 高點太近 → 還在延伸段，不是買點
+            # 最高點落在最近 3 週內。若它只比更早的高點多出一點、而且兩者之間確實修正過，
+            # 是「在舊底部上緣試探後縮回」，底部仍在延續；否則就是還在上漲途中，不是買點。
+            cut = end - MIN_BASE_DAYS
+            old = h[start:cut]
+            ok = len(old) >= 10
+            if ok:
+                rel2 = len(old) - 1 - int(np.argmax(old[::-1]))
+                cand2 = start + rel2
+                ok = (h[cand] <= h[cand2] * (1 + POKE_MAX_PCT / 100.0)
+                      and (h[cand2] - l[cand2:cand + 1].min()) / h[cand2] * 100.0 >= MIN_BASE_DEPTH)
+            if not ok:
+                _BASE_REJECT = "recent_high"
+                return None
+            cand, rel, days, is_poke = cand2, rel2, last - cand2, True
         if start > 0 and rel < 3:
             continue                                      # 視窗邊緣的假高點
         depth = (h[cand] - l[cand:end].min()) / h[cand] * 100.0
@@ -816,13 +1102,14 @@ def analyze_base(h, l, c, v, v50, atr_pct, end, m=None):
         if depth < MIN_BASE_DEPTH:
             _BASE_REJECT = "too_shallow"
             return None
-        p0, mkt_dd = cand, dd
+        p0, mkt_dd, poke = cand, dd, is_poke
         break
     if p0 is None:
         _BASE_REJECT = "too_deep"
         return None
 
-    base_high = float(h[p0])
+    base_high = float(h[p0])                              # 左側高點：修正幅度由此起算
+    base_top = float(h[p0:end].max())                     # 整個底部的最高價（試探過的話會略高於左側高點）
     lo_i = p0 + int(np.argmin(l[p0:end]))
     base_low = float(l[lo_i])
     base_depth = (base_high - base_low) / base_high * 100.0
@@ -878,7 +1165,8 @@ def analyze_base(h, l, c, v, v50, atr_pct, end, m=None):
     )
 
     hi5 = float(h[end - 5:end].max())
-    tight5 = (hi5 - float(l[end - 5:end].min())) / hi5 * 100.0
+    lo5 = float(l[end - 5:end].min())
+    tight5 = (hi5 - lo5) / hi5 * 100.0
 
     # p.241、p.271 箱形／平坦底部：沒有明顯收縮、修正 10~15% 內 → 以底部最高價為樞紐
     is_flat = (
@@ -889,10 +1177,34 @@ def analyze_base(h, l, c, v, v50, atr_pct, end, m=None):
         and not compressed
     )
     if is_flat:
-        pivot_price = base_high
+        pivot_price = base_top
         t_label = "箱形"
     else:
         t_label = f"{n_t}T"
+
+    # 樞紐未成型的主要原因（只用於診斷）
+    why_not = ""
+    if not (is_vcp or is_flat):
+        if compressed:
+            why_not = "compressed"
+        elif n_t < 2:
+            why_not = "one_contraction"
+        elif n_t > 6:
+            why_not = "too_many_swings"
+        elif violations > (1 if n_t >= 4 else 0):
+            why_not = "not_contracting"
+        elif final > min(depths) + 1e-9:
+            why_not = "final_not_smallest"
+        elif final > FINAL_CONTRACTION_MAX:
+            why_not = "final_too_wide"
+        elif final > depths[0] * FINAL_VS_FIRST:
+            why_not = "final_vs_first"
+        elif not in_upper_half:
+            why_not = "lower_half"
+        elif pivot_age < PIVOT_MIN_AGE:
+            why_not = "pivot_too_new"
+        else:
+            why_not = "other"
 
     # p.269 樞紐點量縮；常出現整個底部的最低量
     vb = float(v50[last]) if v50[last] > 0 else 1.0
@@ -921,6 +1233,12 @@ def analyze_base(h, l, c, v, v50, atr_pct, end, m=None):
         "is_flat": bool(is_flat),
         "pivot": float(pivot_price),
         "base_high": base_high,
+        "base_top": base_top,
+        "poke": bool(poke),
+        "danger_low": float(lo5 if is_flat else cons[-1][2]),   # ②p.70 危險點：突破前緊密區的低點
+        "why_not": why_not,
+        "vol5": v5 / vb,
+        "volmin": vmin / vb,
         "base_depth": base_depth,
         "base_days": int(base_days),
         "depths": depths,
@@ -933,7 +1251,7 @@ def analyze_base(h, l, c, v, v50, atr_pct, end, m=None):
         "compressed": bool(compressed),
         "orderly": bool(orderly),
         "rel_depth": rel_depth,
-        "footprint": f"{weeks}W {depths[0]:.0f}/{shown_final:.0f} {t_label}",
+        "footprint": f"{weeks}W {base_depth:.0f}/{shown_final:.0f} {t_label}",   # 時間／最深修正／最近一次／收縮次數
         "depth_str": "→".join(f"{d:.0f}" for d in depths),
     }
 
@@ -964,7 +1282,8 @@ def detect_power_play(h, l, c, v, n):
     tight = (hi - float(l[end - k:end].min())) / hi * 100.0
     if tight > 10.0:
         return None
-    return {"pivot": hi, "gain": float((h[peak] / run_lo - 1) * 100.0), "corr": float(corr), "tight": tight, "days": int(days)}
+    return {"pivot": hi, "low": float(l[end - k:end].min()), "gain": float((h[peak] / run_lo - 1) * 100.0),
+            "corr": float(corr), "tight": tight, "days": int(days)}
 
 
 def detect_cheat(h, l, c, v, v50, end):
@@ -1047,7 +1366,7 @@ def detect_primary_base(h, l, c, v, n):
     va = float(v[max(0, end - 50):end].mean()) or 1.0
     dry = float(v[end - 5:end].mean()) <= 0.8 * va
     pivot = hi if hi >= base_high * 0.92 else base_high
-    return {"pivot": pivot, "base_high": base_high, "depth": depth, "tight": tight, "dry": bool(dry),
+    return {"pivot": pivot, "low": float(l[end - k:end].min()), "base_high": base_high, "depth": depth, "tight": tight, "dry": bool(dry),
             "weeks": max(1, int(round(days / 5.0))), "listed_weeks": int(round(n / 5.0))}
 
 
@@ -1079,14 +1398,36 @@ def count_bases(c, rc, ma200):
 # ==========================================
 # 8. Telegram
 # ==========================================
+def _ents(t):
+    """Telegram 每則最多 100 個格式標記，超過的粗體會失效"""
+    return t.count("<b>") + t.count("<i>") + t.count("<code>")
+
+
+def _split_message(message, max_len=3900, max_ents=95):
+    """單則上限 4096 字、100 個標記。每個標記都在同一行內開關，所以按行切不會切壞 HTML。"""
+    if len(message) <= max_len and _ents(message) <= max_ents:
+        return [message]
+    parts, cur = [], ""
+    for line in message.split("\n"):
+        add = line + "\n"
+        if cur.strip() and (len(cur) + len(add) > max_len or _ents(cur) + _ents(add) > max_ents):
+            parts.append(cur)
+            cur = ""
+        cur += add
+    if cur.strip():
+        parts.append(cur)
+    return parts
+
+
 def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    try:
-        r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}, timeout=15)
-        if r.status_code != 200:
-            print(f"❌ Telegram 回應 {r.status_code}: {r.text[:200]}")
-    except Exception as e:
-        print(f"❌ 網路連線錯誤：{e}")
+    for part in _split_message(message):
+        try:
+            r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": part, "parse_mode": "HTML"}, timeout=15)
+            if r.status_code != 200:
+                print(f"❌ Telegram 回應 {r.status_code}: {r.text[:200]}")
+        except Exception as e:
+            print(f"❌ 網路連線錯誤：{e}")
 
 
 def send_reports(holdings_msg, header, sections):
@@ -1098,9 +1439,7 @@ def send_reports(holdings_msg, header, sections):
     if not blocks:
         send_telegram_msg(holdings_msg + header + "\n今天沒有符合條件的標的。")
         return
-    def ents(t):                                        # Telegram 每則最多 100 個格式標記，超過的粗體會失效
-        return t.count("<b>") + t.count("<i>") + t.count("<code>")
-
+    ents = _ents
     pages, cur = [], ""
     for b in blocks:
         if cur and (len(cur) + len(b) + 2 > 3200 or ents(cur) + ents(b) > 85):
@@ -1162,7 +1501,7 @@ def _extract(data, sym, single):
     return data[sym].copy()
 
 
-def analyze_market(stock_dict, meta, tw_open, uni_info):
+def analyze_market(stock_dict, meta, tw_open, uni_info, tstats=None):
     symbols = list(stock_dict.keys())
     raw_data, young_data, rs_scores = {}, {}, {"tw": {}, "us": {}}
     start_date = (pd.Timestamp.now() - pd.DateOffset(months=HISTORY_MONTHS)).strftime('%Y-%m-%d')
@@ -1206,6 +1545,13 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
     indices = fetch_indices(start_date)
     regime = {mkt: market_regime(indices.get(mkt)) for mkt in MARKET_CFG}
     stop_cap = {mkt: (TOUGH_MARKET_STOP_PCT if regime[mkt] == "bear" else MAX_STOP_PCT) for mkt in MARKET_CFG}
+    # ②p.86「結果為基礎」：停損不該超過自己平均獲利的一半。交易紀錄夠多才啟用。
+    rba_cap = None
+    if tstats and tstats["n"] >= TRADE_STATS_MIN_N and tstats["avg_gain"] > 0:
+        half = max(MIN_STOP_PCT, tstats["avg_gain"] / 2.0)
+        if half < MAX_STOP_PCT:
+            rba_cap = half
+            stop_cap = {mkt: min(x, half) for mkt, x in stop_cap.items()}
 
     keys = ("brk", "recent", "star", "squat", "cheat", "power", "primary", "pb")
     cats = {k: {"tw": [], "us": []} for k in keys}
@@ -1216,6 +1562,7 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
     grp_pass = {"tw": defaultdict(list), "us": defaultdict(list)}
     grp_nh = {"tw": defaultdict(int), "us": defaultdict(int)}
     pending = []     # 需要產業群資訊的卡片，掃完後再補
+    near_miss = []   # 診斷用
 
     def industry_of(sym):
         ind = (meta.get(sym) or {}).get("industry")
@@ -1277,16 +1624,17 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
             vol_ok = vol_ratio >= BREAKOUT_VOL_MULT or locked_up
             lock_note = "｜🔒漲停鎖住，買不到；明日開高超過追價上限就放棄" if locked_up else ""
 
-            stop_pct = float(np.clip(2 * atr_pct[-1] * 100.0, MIN_STOP_PCT, stop_cap[mkt]))
-            pos = position_pct(stop_pct, mkt)
-            pos_note = f"部位≤{pos:.0f}%" + ("(跌停風險)" if is_tw and pos < MAX_POSITION_PCT else "")
+            cap = stop_cap[mkt]
 
-            def risk_line(pivot):
-                return f"🛡️停損 <b>{pivot * (1 - stop_pct / 100):.2f}</b> (-{stop_pct:.1f}%)｜{pos_note}"
+            def risk_line(entry, danger_low):
+                sp, pct, capped = plan_stop(entry, danger_low, cap)
+                pos = position_pct(pct, mkt)
+                pos_note = f"部位≤{pos:.3g}%" + ("(跌停風險)" if is_tw and pos < MAX_POSITION_PCT else "")
+                return f"🛡️停損 <b>{sp:.2f}</b> (-{pct:.1f}%{'上限' if capped else ''})｜{pos_note}"
 
             head = f"<b>{title}</b>｜現價 <b>{c_now:.2f}</b>｜RS <b>{rs}</b>"
 
-            # 出貨跡象（p.99-100）
+            # 出貨跡象（p.99-100、②p.242）
             diff40 = np.diff(c[-41:])
             big40 = v[-40:] > v50[-40:]
             up_days = int((big40 & (diff40 > 0)).sum())
@@ -1294,12 +1642,12 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
             imax = n - 60 + int(np.argmax(v[-60:]))
             s3 = stage3_flags(c, v, v50, recent=15)
             d_rules = {
-                "d_maxvol_down": c[imax] < c[imax - 1] * 0.98,                    # 近 60 日最大量那天是大跌
                 "d_today_heavy_down": c_now < c_prev * 0.985 and vol_ratio >= 1.35,  # 今天帶量下跌
                 "d_more_down_days": dn_days > up_days + 1,                         # 大量下跌日明顯較多
-                "d_stage3": s3 is not None,                                        # 一年來最大跌幅且爆量
+                "d_stage3": s3 is not None,                                        # 一年來最大跌幅／最大量下跌
             }
             distribution = any(d_rules.values())
+            maxvol_down = bool(c[imax] < c[imax - 1] * 0.98)   # 近 60 日最大量那天收跌：書上沒有這條，只標示與扣分，不剔除
 
             # ---------- p.298 強勁表現型態（書中明言不要求基本面，但要守供需法則）----------
             pp = detect_power_play(h, l, c, v, n)
@@ -1309,7 +1657,7 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
                 cats["power"][mkt].append((rs + pp["gain"] / 10, symbol, (
                     f"{head}\n"
                     f"  ⚡ <b>{state}｜樞紐 {pp['pivot']:.2f}</b>{lock_note}\n"
-                    f"  {risk_line(pp['pivot'])}\n"
+                    f"  {risk_line(max(c_now, pp['pivot']), pp['low'])}\n"
                     f"  8週漲 {pp['gain']:.0f}%｜整理 {pp['days']}天 修正 {pp['corr']:.0f}%｜緊密 {pp['tight']:.0f}%"
                 ), c_now))
                 in_power = True
@@ -1336,11 +1684,13 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
                         state = None
                     if state:
                         extra = ("｜💧量縮" if ch["dry"] else "") + ("｜洗盤✓" if ch["shake"] else "")
-                        cheat_item = (rs + (15 if ch["dry"] else 0) + (5 if ch["shake"] else 0), symbol, (
+                        # ②p.202：停頓區在杯子下 1/3 是「低位作弊」，風險較高，書中只先建一部分；中間 1/3 才是 3C
+                        kind = "低位作弊(位置低、風險較高，書中只先建部分)" if ch["recov"] < 100.0 / 3 else "3C"
+                        cheat_item = (rs + (15 if ch["dry"] else 0) + (5 if ch["shake"] else 0) - (5 if ch["recov"] < 100.0 / 3 else 0), symbol, (
                             f"{head}\n"
                             f"  🥄 <b>{state}</b>{lock_note}\n"
-                            f"  {risk_line(ch['pivot'])}\n"
-                            f"  杯 {ch['weeks']}週 深{ch['depth']:.0f}%・已收復{ch['recov']:.0f}%・停頓{ch['pause_days']}天 幅度{ch['pause_range']:.0f}%{extra}"
+                            f"  {risk_line(max(c_now, ch['pivot']), ch['pause_low'])}\n"
+                            f"  {kind}｜杯 {ch['weeks']}週 深{ch['depth']:.0f}%・已收復{ch['recov']:.0f}%・停頓{ch['pause_days']}天 幅度{ch['pause_range']:.0f}%{extra}"
                         ), c_now)
 
             # ---------- 第一層：p.106 趨勢樣板八項 ----------
@@ -1362,6 +1712,7 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
             stats["template"] += 1
             for dk, dv in d_rules.items():
                 stats[dk] += int(bool(dv))
+            stats["w_maxvol_down"] += int(maxvol_down)
             grp_pass[mkt][ind].append((rs, symbol))
 
             if is_red and vol_ok and c_now >= h[-20:-1].max() and not distribution:
@@ -1381,27 +1732,50 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
             score += max(0, up_days - dn_days) * 4
 
             tags = [f"大量漲跌日 <b>{up_days}:{dn_days}</b>"]
+            if maxvol_down:
+                tags.append("⚠️近60日最大量是下跌日")
+                score -= 10
+            # 底部計數（p.108-110、②p.229-232）：第 1~2 個最好，第 3~4 個偏晚，第 5 個以後失敗率高
             nb, nb_known = count_bases(c, rc, ma200)
             if nb and (nb_known or nb >= 3):
-                if nb >= 4:
-                    tags.append(f"⚠️第{'' if nb_known else '≥'}{nb}底(後期 p.110)")
+                pre = '' if nb_known else '≥'
+                if nb >= 5:
+                    tags.append(f"⚠️第{pre}{nb}底(失敗率高)")
+                    score -= 25
+                elif nb == 4:
+                    tags.append(f"⚠️第{pre}4底(後期)")
                     score -= 15
+                elif nb == 3:
+                    tags.append(f"第{pre}3底(偏晚)")
                 else:
-                    tags.append(f"第{'' if nb_known else '≥'}{nb}底")
-                    score += 5 if (nb <= 2 and nb_known) else 0
+                    tags.append(f"第{nb}底")
+                    score += 5
+            # RS 線（個股÷大盤）：領先創高最好；②p.157 希望已上升 6~13 週、不該明顯走低
             rs_tag = ""
             if m is not None:
                 rsl = c / m
                 if rsl[-1] >= rsl[-252:].max() * 0.999:
                     rs_tag = "RS線領先創高" if c_now < hi52 * 0.98 else "RS線新高"
                     score += 8 if c_now < hi52 * 0.98 else 4
+                elif rsl[-1] > rsl[-31] and rsl[-1] > rsl[-66]:
+                    rs_tag = "RS線升13週"
+                    score += 3
+                elif rsl[-1] > rsl[-31]:
+                    rs_tag = "RS線升6週"
+                    score += 1
+                elif rsl[-1] < rsl[-31] and rsl[-1] < rsl[-66]:
+                    rs_tag = "⚠️RS線走低(②p.157)"
+                    score -= 8
+                    stats["w_rsline_down"] += 1
 
-            def card(action, fp, pivot, extra_score=0, dry=False, show_risk=True, note=""):
+            def card(action, fp, pivot, extra_score=0, dry=False, show_risk=True, note="", entry=None):
                 t = list(tags)
                 if dry:
                     t.insert(0, "💧💧底部最低量" if fp.get("dry_extreme") else "💧量縮")
                 if fp.get("shakeouts"):
                     t.append(f"洗盤{fp['shakeouts']}次")
+                if fp.get("poke"):
+                    t.append("曾試探舊高")
                 if fp.get("rel_depth") and fp["rel_depth"] > REL_DEPTH_WARN:
                     t.append(f"⚠️修正為大盤{fp['rel_depth']:.1f}倍")
                 if fp.get("compressed"):
@@ -1413,7 +1787,7 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
                     t.append("⚠️還原資料異常，請對照線圖")
                 text = f"{head}\n  {action}{lock_note}\n"
                 if show_risk:
-                    text += f"  {risk_line(pivot)}\n"
+                    text += f"  {risk_line(entry or pivot, fp.get('danger_low'))}\n"
                 text += f"  📐<code>{fp['footprint']}</code> ({fp['depth_str']})｜" + "｜".join(t)
                 if note:
                     text += f"\n  {note}"
@@ -1427,74 +1801,84 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
                 cats[key][mkt].append(item)
                 pending.append((key, mkt, symbol, ind, rs, rs_tag))
 
-            # ---------- 第三層：截至昨天的底部，今天是否突破 ----------
-            fp = analyze_base(h, l, c, v, v50, atr_pct, n - 1, m)
+            def ft_note(ft):
+                """②p.42-56：突破後的跟進買盤與違例 → (卡片上的一行, 加減分)"""
+                if not ft:
+                    return "", 0
+                txt = f"突破後{ft['days']}天 {ft['up']}漲{ft['dn']}跌"
+                if ft["pull"] is not None:
+                    txt += "｜回檔量縮✅" if ft["pull"] < 0.8 else ("｜⚠️回檔量大於上漲量" if ft["pull"] > 1.1 else "")
+                if ft["viol"]:
+                    txt += f"｜⚠️違例：{'、'.join(ft['viol'])}"
+                return txt, (5 if ft["strong"] else 0) - 6 * len(ft["viol"])
+
+            # ---------- 第三層：近 10 日內有沒有過「有效突破」（樞紐固定在突破當時）----------
+            # 先看這層：已經突破的股票，接下來幾天形成的小高點不算新樞紐，不能拿來當追價的理由。
             placed, fail_note = False, ""
+            for kk in range(POST_BREAKOUT_DAYS, 0, -1):
+                b = n - 1 - kk
+                fpb = analyze_base(h, l, c, v, v50, atr_pct, b, m)
+                if not (fpb and fpb["ready"] and fpb["dryup"]):
+                    continue
+                pv = fpb["pivot"]
+                b_locked = bool(lim and (c[b] / c[b - 1] - 1) * 100 >= lim - 0.7 and abs(h[b] - c[b]) < 1e-9)
+                if not (c[b] > pv and c[b - 1] <= pv and v50[b - 1] > 0 and (v[b] >= BREAKOUT_VOL_MULT * v50[b - 1] or b_locked)):
+                    continue
+                dist = (c_now / pv - 1) * 100.0
+                dipped = bool((c[b + 1:n - 1] < pv).any()) if kk > 1 else False
+                stop_b = plan_stop(pv, fpb["danger_low"], cap)[0]
+                note, ft_score = ft_note(follow_through(h, l, c, v, v50, rc, ma20, ma50, b, pv))
+                if c_now > pv * (1 + CHASE_LIMIT_PCT / 100):
+                    placed = True                                   # 已延伸，不追價
+                    stats["x_extended_after_breakout"] += 1
+                elif c_now >= pv:
+                    if dipped and c_now > c_prev:
+                        add("squat", card(f"🔄 <b>反轉回升：重新站上樞紐 {pv:.2f}</b> ({kk}天前突破)", fpb, pv, 15 + ft_score, True, note=note, entry=c_now))
+                    else:
+                        add("recent", card(f"✅ <b>{kk}天前突破 {pv:.2f}</b>，現高於樞紐 {dist:.1f}% (仍在買進區)", fpb, pv, 10 + ft_score, True, note=note, entry=c_now))
+                    placed = True
+                elif c_now > stop_b and c_now >= ma20[-1]:
+                    add("squat", card(f"🔄 <b>蹲下 squat：跌回樞紐 {pv:.2f} 下方</b> ({kk}天前突破)｜守 20MA {ma20[-1]:.2f}", fpb, pv, 5 + ft_score, True, note=note))
+                    placed = True
+                else:
+                    fail_note = f"⚠️ {kk}天前突破 {pv:.2f} 失敗，等重設樞紐 (p.295)"
+                    continue                                        # 失敗後可能重設樞紐再突破一次 → 繼續往後看
+                break
+
+            # ---------- 第四層：截至昨天的底部 → 今天是否突破、樞紐是否已成型 ----------
+            fp = analyze_base(h, l, c, v, v50, atr_pct, n - 1, m)
             stats["f1_no_distribution"] += 1
+            stats["f1b_recent_breakout_handled"] += int(placed)
             if fp is None:
                 stats["none_" + _BASE_REJECT] += 1
-                if _BASE_REJECT == "recent_high" and n > 120:
-                    # 新高只比 3 週前的舊高多一點 → 可能是舊底部上緣的試探，而不是真的在延伸
-                    if h[-16:].max() <= h[-325:-16].max() * 1.03:
-                        stats["none_recent_high_poke"] += 1
-            if fp:
+            else:
                 stats["f2_has_base"] += 1
+                stats["f2b_via_poke"] += int(fp["poke"])
                 if fp["ready"]:
                     stats["f3_pivot_ready"] += 1
                     near = -STAR_MAX_DIST <= (c_now / fp["pivot"] - 1) * 100.0 <= CHASE_LIMIT_PCT
                     stats["f4_ready_near_pivot"] += int(near)
                     stats["f5_ready_near_dry"] += int(near and fp["dryup"])
-            if fp and fp["ready"]:
+                else:
+                    stats["nr_" + fp["why_not"]] += 1
+            if not placed and fp and fp["ready"]:
                 pivot = fp["pivot"]
                 dist = (c_now / pivot - 1) * 100.0
                 if c_now > pivot and c_prev <= pivot:
                     if dist <= CHASE_LIMIT_PCT and is_red and vol_ok and fp["dryup"]:
                         add("brk", card(
                             f"🚀 <b>突破樞紐 {pivot:.2f}</b> ({vol_label}{vol_ratio:.1f}倍)｜追價上限 {pivot * (1 + CHASE_LIMIT_PCT / 100):.2f}",
-                            fp, pivot, 30, True))
+                            fp, pivot, 30, True, note=fail_note, entry=c_now))
                     elif dist <= CHASE_LIMIT_PCT:
                         why = "量不足" if not vol_ok else ("突破前未量縮" if not fp["dryup"] else "收盤偏低")
-                        add("star", card(f"⚠️ <b>越過樞紐 {pivot:.2f} 但{why}</b> ({vol_label}{vol_ratio:.1f}倍)", fp, pivot, 5, fp["dryup"]))
+                        add("star", card(f"⚠️ <b>越過樞紐 {pivot:.2f} 但{why}</b> ({vol_label}{vol_ratio:.1f}倍)", fp, pivot, 5, fp["dryup"],
+                                         note=fail_note, entry=c_now))
                     placed = True
                 elif c_now <= pivot and dist >= -STAR_MAX_DIST and fp["dryup"] and c_now >= ma20[-1] * 0.99:
                     mark = "★◎" if (fp["final"] <= 5.0 or fp["dry_extreme"]) else "★"
-                    add("star", card(f"🎯 <b>{mark} 樞紐 {pivot:.2f}</b> (差 {abs(dist):.1f}%)｜突破需量 ≥{BREAKOUT_VOL_MULT}倍", fp, pivot, 20, True))
+                    add("star", card(f"🎯 <b>{mark} 樞紐 {pivot:.2f}</b> (差 {abs(dist):.1f}%)｜突破需量 ≥{BREAKOUT_VOL_MULT}倍", fp, pivot, 20, True,
+                                     note=fail_note))
                     placed = True
-
-            # ---------- 第四層：近 10 日是否突破過 → 蹲下／反轉回升／網球行為（樞紐固定在突破當時）----------
-            if not placed:
-                for kk in range(POST_BREAKOUT_DAYS, 0, -1):
-                    b = n - 1 - kk
-                    fpb = analyze_base(h, l, c, v, v50, atr_pct, b, m)
-                    if not (fpb and fpb["ready"] and fpb["dryup"]):
-                        continue
-                    pv = fpb["pivot"]
-                    b_locked = bool(lim and (c[b] / c[b - 1] - 1) * 100 >= lim - 0.7 and abs(h[b] - c[b]) < 1e-9)
-                    if not (c[b] > pv and c[b - 1] <= pv and v50[b - 1] > 0 and (v[b] >= BREAKOUT_VOL_MULT * v50[b - 1] or b_locked)):
-                        continue
-                    dist = (c_now / pv - 1) * 100.0
-                    dipped = bool((c[b + 1:n - 1] < pv).any()) if kk > 1 else False
-                    # p.282 網球行為：拉回時的量應小於上漲時
-                    seg_c, seg_p, seg_v = c[b:n], c[b - 1:n - 1], v[b:n]
-                    upv, dnv = seg_v[seg_c > seg_p], seg_v[seg_c < seg_p]
-                    tb = ""
-                    if len(upv) and len(dnv):
-                        ratio = dnv.mean() / upv.mean()
-                        tb = "回檔量縮✅" if ratio < 0.8 else ("⚠️回檔量大於上漲量" if ratio > 1.1 else "")
-                    if c_now > pv * (1 + CHASE_LIMIT_PCT / 100):
-                        placed = True                                   # 已延伸，不追價
-                    elif c_now >= pv:
-                        if dipped and c_now > c_prev:
-                            add("squat", card(f"🔄 <b>反轉回升：重新站上樞紐 {pv:.2f}</b> ({kk}天前突破)", fpb, pv, 15, True, note=tb))
-                        else:
-                            add("recent", card(f"✅ <b>{kk}天前突破 {pv:.2f}</b>，現高於樞紐 {dist:.1f}% (仍在買進區)", fpb, pv, 10, True, note=tb))
-                        placed = True
-                    elif c_now > pv * (1 - stop_pct / 100) and c_now >= ma20[-1]:
-                        add("squat", card(f"🔄 <b>蹲下 squat：跌回樞紐 {pv:.2f} 下方</b> ({kk}天前突破)｜守 20MA {ma20[-1]:.2f}", fpb, pv, 5, True, note=tb))
-                        placed = True
-                    else:
-                        fail_note = f"⚠️ {kk}天前突破 {pv:.2f} 失敗，等重設樞紐 (p.295)"
-                    break
 
             # ---------- 3C：位置較低的早期進場點 ----------
             if not placed and cheat_item:
@@ -1503,7 +1887,7 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
 
             # ---------- 第五層：pb 觀察池（還不是買點，所以不顯示停損與部位）----------
             if not placed and not in_power and fp and (fp["orderly"] or fail_note) and not fp["compressed"]:
-                ref = fp["pivot"] if fp["ready"] else fp["base_high"]
+                ref = fp["pivot"] if fp["ready"] else fp["base_top"]
                 dist = (c_now / ref - 1) * 100.0
                 if -PB_MAX_DIST <= dist <= 0:
                     need = []
@@ -1513,6 +1897,26 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
                         need.append("量未縮")
                     add("pb", card(f"📌 <b>pb｜參考高點 {ref:.2f}</b> (差 {abs(dist):.1f}%)｜{'、'.join(need) or '等靠近樞紐'}",
                                    fp, ref, -int(abs(dist)), fp["dryup"], show_risk=False, note=fail_note))
+
+            # 診斷用：有底部、離參考高點不遠、卻沒進一~五類的，記下原因（只印在 log）
+            if fp and not placed:
+                ref = fp["pivot"] if fp["ready"] else fp["base_top"]
+                dist = (c_now / ref - 1) * 100.0
+                if -8.0 <= dist <= CHASE_LIMIT_PCT:
+                    if not fp["ready"]:
+                        why = NR_TXT.get(fp["why_not"], fp["why_not"])
+                    elif dist > 0:
+                        why = "已站上樞紐，但近10日沒有帶量的有效突破"
+                    elif dist < -STAR_MAX_DIST:
+                        why = f"離樞紐超過{STAR_MAX_DIST:.0f}%"
+                    elif not fp["dryup"]:
+                        why = "量未縮"
+                    else:
+                        why = "低於20MA"
+                    ds = fp["depth_str"].split("→")
+                    ds = "→".join(ds if len(ds) <= 8 else ds[:3] + ["…"] + ds[-4:])
+                    near_miss.append((abs(dist), f"{symbol:<9} {fp['footprint']} ({ds}) 參考{ref:.2f} 差{dist:+.1f}%"
+                                                 f" 量比5日{fp['vol5']:.2f}/最低{fp['volmin']:.2f} → {why}"))
         except Exception:
             continue
 
@@ -1537,10 +1941,7 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
                 continue
             if n >= 50 and c_now < float(np.mean(rc[-50:])):
                 continue
-            pc = np.r_[np.nan, c[:-1]]
-            tr = np.fmax(h - l, np.fmax(np.abs(h - pc), np.abs(l - pc)))
-            atr = float(np.nanmean(tr[-20:]) / c_now * 100.0)
-            stop_pct = float(np.clip(2 * atr, MIN_STOP_PCT, stop_cap[mkt]))
+            sp, stop_pct, _ = plan_stop(max(c_now, pb["pivot"]), pb["low"], stop_cap[mkt])
             name = stock_dict.get(symbol, symbol)
             flag = "🇹🇼" if mkt == "tw" else "🇺🇸"
             title = f"{flag} {symbol} {html.escape(name)}" if name != symbol else f"{flag} {symbol}"
@@ -1551,7 +1952,7 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
             cats["primary"][mkt].append((50 - pb["depth"] + (15 if pb["dry"] else 0) - pb["tight"], symbol, (
                 f"<b>{title}</b>｜現價 <b>{c_now:.2f}</b>｜掛牌約 {pb['listed_weeks']} 週\n"
                 f"  🌱 <b>{state}</b>\n"
-                f"  🛡️停損 <b>{pb['pivot'] * (1 - stop_pct / 100):.2f}</b> (-{stop_pct:.1f}%)｜部位≤{pos:.0f}%\n"
+                f"  🛡️停損 <b>{sp:.2f}</b> (-{stop_pct:.1f}%)｜部位≤{pos:.3g}%\n"
                 f"  初選底部 {pb['weeks']}週 修正{pb['depth']:.0f}%・緊密{pb['tight']:.0f}%" + ("｜💧量縮" if pb["dry"] else "")
             ), c_now))
         except Exception:
@@ -1608,20 +2009,32 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
             for s, sym, text, px in ranked[:lim]:
                 f = get_fundamentals(sym, px, tw_open.get(sym), deep=deep)
                 listed.add(sym)
-                out.append(text + extra_line.get((key, sym), "") + "\n  💰 " + fund_text(f))
+                earn = ""
+                ed = f.get("earn_days")
+                if key != "pb" and ed is not None and 0 <= ed <= EARNINGS_WARN_DAYS:
+                    earn = f"\n  📅 財報{'今天' if ed == 0 else f'約 {ed} 天後'}（②p.143：沒有 {EARNINGS_CUSHION_PCT:.0f}% 獲利緩衝不抱大部位過財報）"
+                out.append(text + extra_line.get((key, sym), "") + "\n  💰 " + fund_text(f) + earn)
         return out
 
     print("🔎 漏斗：" + "｜".join(f"{k}={stats[k]}" for k in ("scanned", "liquid", "pinned", "template", "f1_no_distribution",
-          "f2_has_base", "f3_pivot_ready", "f4_ready_near_pivot", "f5_ready_near_dry")))
+          "f1b_recent_breakout_handled", "x_extended_after_breakout", "f2_has_base", "f2b_via_poke", "f3_pivot_ready",
+          "f4_ready_near_pivot", "f5_ready_near_dry")))
     print("🔎 無底部原因：" + "｜".join(f"{k[5:]}={v}" for k, v in sorted(stats.items()) if k.startswith("none_")))
-    print("🔎 出貨濾網(可重複)：" + "｜".join(f"{k[2:]}={v}" for k, v in sorted(stats.items()) if k.startswith("d_")))
+    print("🔎 有底部但樞紐未成型：" + "｜".join(f"{k[3:]}={v}" for k, v in sorted(stats.items()) if k.startswith("nr_")))
+    print("🔎 出貨濾網(可重複)：" + "｜".join(f"{k[2:]}={v}" for k, v in sorted(stats.items()) if k.startswith("d_"))
+          + f"｜僅警示不剔除：maxvol_down={stats['w_maxvol_down']}｜rsline_down={stats['w_rsline_down']}")
+    if near_miss:
+        near_miss.sort(key=lambda x: x[0])
+        print(f"🔎 差一步名單（有底部、離參考高點 8% 內、沒進一~五類；共 {len(near_miss)} 檔，列最近的 25 檔）：")
+        for _, txt in near_miss[:25]:
+            print("   " + txt)
     print("💰 產生日報...")
     sections = [
         ("🚀 <b>【一、今日帶量突破樞紐】</b>", render("brk", True)),
         ("✅ <b>【二、近日已突破、仍在買進區】</b>", render("recent", True)),
         ("★ <b>【三、樞紐成型＋量縮（等突破，勿預先卡位 p.270）】</b>", render("star", True)),
         ("🔄 <b>【四、蹲下 Squat／反轉回升 (p.271)】</b>", render("squat", True)),
-        ("🥄 <b>【五、3C 杯狀完成騙局 (p.286)】</b>", render("cheat", True)),
+        ("🥄 <b>【五、3C／低位作弊 (p.286、②p.198)】</b>", render("cheat", True)),
         ("⚡ <b>【六、強勁表現型態 (p.298)】</b>", render("power", False)),
         ("🌱 <b>【七、新上市初選底部 (第11章)】</b>", render("primary", False)),
         ("📌 <b>【八、pb 觀察池（還不是買點）】</b>", render("pb", False)),
@@ -1637,7 +2050,7 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
             break
     sections.append(("💥 <b>【九、基本面強＋帶量創高（觀察，非買點）】</b>", beat))
 
-    holdings_msg = check_my_holdings(raw_data)
+    holdings_msg = check_my_holdings(raw_data) + trade_stats_text(tstats, rba_cap)
 
     # ---------- 表頭 ----------
     mk = []
@@ -1645,13 +2058,13 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
         mk.append(f"{cfg['name']}{REGIME_TXT[regime[mkt]]} 新高{nh[mkt]}/新低{nl[mkt]}")
     header = (
         f"📊 <b>【《超級績效》SEPA 選股日報】</b>\n"
-        f"<i>台股 {uni_info['tw_n']}｜美股 {uni_info['us_n']}（{html.escape(uni_info['us_source'])}）\n"
-        f"有 K 線 {stats['scanned']}｜過流動性 {stats['liquid']}｜過趨勢樣板 {stats['template']}</i>\n"
+        f"<i>台股 {uni_info['tw_n']}｜美股 {uni_info['us_n']}（{html.escape(uni_info['us_source'])}）</i>\n"
+        f"<i>有 K 線 {stats['scanned']}｜過流動性 {stats['liquid']}｜過趨勢樣板 {stats['template']}</i>\n"
         f"大盤：{'｜'.join(mk)}\n"
     )
     for mkt, cfg in MARKET_CFG.items():
         if regime[mkt] == "bear":
-            header += f"⚠️ {cfg['name']}空頭：書中做法是降低曝險、停損縮到 5~6% (p.364)，卡片停損上限已改為 {TOUGH_MARKET_STOP_PCT:.0f}%\n"
+            header += f"⚠️ {cfg['name']}空頭：書中做法是降低曝險、停損縮到 5~6% (p.364、②p.83)，卡片停損上限已改為 {min(TOUGH_MARKET_STOP_PCT, stop_cap[mkt]):.0f}%\n"
         if mkt in grp_line:
             header += f"🏭 {cfg['name']}領導產業(過樣板/總數)：{grp_line[mkt]}\n"
     return holdings_msg, header, sections
@@ -1660,5 +2073,5 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
 if __name__ == "__main__":
     stock_dict, meta, uni_info = get_entire_market_universe()
     tw_open = fetch_tw_open_data()
-    holdings_msg, header, sections = analyze_market(stock_dict, meta, tw_open, uni_info)
+    holdings_msg, header, sections = analyze_market(stock_dict, meta, tw_open, uni_info, load_trade_stats())
     send_reports(holdings_msg, header, sections)
