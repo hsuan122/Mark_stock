@@ -1,5 +1,5 @@
 """
-《超級績效》SEPA / VCP 選股雷達  v4 —— 依《超級績效》第 3~13 章與《超級績效 2》第 1~10 章校正，台股／美股分流
+《超級績效》SEPA / VCP 選股雷達  v4.1 —— 依《超級績效》第 3~13 章與《超級績效 2》第 1~10 章校正，台股／美股分流
 
 書中規則對照（頁碼為中譯本）：
   第 3 章  p.54   評等程序：先過趨勢樣板 → 再用盈餘/營收/利潤率/相對強度過濾 → 人工檢視
@@ -21,7 +21,7 @@
   第 5 章 ②p.143   沒有 10% 獲利緩衝不抱大部位過財報
   第 6-7 章 ②p.157  趨勢模板補充（RS 線方向）；②p.198-205 3C 與低位作弊
   第 8 章 ②p.217   部位規模：單筆風險 1.25~2.5%、單一部位 ≤25%
-  第 9 章 ②p.229-252 底部計數；趁強賣（高潮走勢）、趁弱賣；50 日線追蹤；免費參賽
+  第 9 章 ②p.229-252 底部計數；本益比擴張（②p.232-235）；趁強賣（高潮走勢）、趁弱賣；50 日線追蹤；免費參賽
 
 標示「自訂」者不是書中數字，而是為了量化所加的近似條件，可在下方設定區調整。
 本程式只是篩選工具，不構成投資建議。
@@ -74,6 +74,8 @@ EARNINGS_CUSHION_PCT = 10.0   # ②p.143：帳面獲利不到 10% 就不抱大�
 FOLLOW_DAYS = 10              # ②p.46：突破後第 1~2 週觀察跟進買盤與違例
 TRADES_FILE = os.environ.get("TRADES_FILE", "trades.csv")   # 已平倉交易紀錄；沒有這個檔就不顯示統計
 TRADE_STATS_MIN_N = 20        # 自訂：累積到這個筆數，才用「平均獲利的一半」限制卡片停損上限（②p.86）
+PE_EXPANSION_WARN = 2.0       # ②p.233：本益比比第一個底部當時擴張一倍以上 → 已到上漲後段
+SEND_DIAGNOSTICS = True       # 調整期間多傳一則診斷訊息到 Telegram；穩定後改成 False
 
 # --- 市場別設定（台股／美股分開）---
 MARKET_CFG = {
@@ -111,7 +113,8 @@ MA50_OVER_MA150_PCT = 0.0     # 自訂：書中只要求 50 > 150 > 200
 # --- 底部 / VCP (p.238-253) ---
 BASE_LOOKBACKS = [325, 200, 130, 90, 60, 40]   # 3~65 週
 MIN_BASE_DAYS = 15
-POKE_MAX_PCT = 3.0            # 自訂：近 3 週的新高若只比更早的高點多出這個幅度以內，視為在舊底部上緣試探，底部延續
+POKE_MAX_PCT = 3.0            # 自訂：近 3 週的新高若只比舊底部的高點多出這個幅度以內，視為在底部上緣試探，底部延續
+                              # （舊底部本身要先滿 3 週；只有 3 週的來回震盪不算）
 MAX_BASE_DEPTH = 35.0         # p.253、②p.178：最好 10~35%
 MAX_BASE_DEPTH_BEAR = 50.0    # p.226、p.253：大盤重挫時可到 50%，再深就太過份
 MIN_BASE_DEPTH = 5.0          # p.277 手寫清單有 5W 5/2、6W 5/2
@@ -124,7 +127,7 @@ FINAL_VS_FIRST = 0.60         # 自訂
 ZZ_ATR_MULT = 1.5             # 自訂：波段轉折門檻 = ATR% × 此值，夾在 2.5%~8%
 PIVOT_MIN_AGE = 3
 FLAT_BASE_MAX_DEPTH = 15.0    # p.241、p.271
-FLAT_BASE_DAYS = (15, 40)
+FLAT_BASE_DAYS = (20, 40)     # p.241：箱形 4~7 週（上限放寬到 8 週）
 BREAKOUT_VOL_MULT = 1.5       # 自訂下限（書中例子為 3~4 倍以上）
 STAR_MAX_DIST = 6.0
 PB_MAX_DIST = 15.0
@@ -132,7 +135,8 @@ POST_BREAKOUT_DAYS = 10       # p.271：蹲下後有的 10 天或更久才回升
 
 # --- 3C 杯狀完成騙局 (p.286-290) ---
 CHEAT_MIN_DEPTH = 15.0
-CHEAT_MAX_DEPTH = 50.0
+CHEAT_MAX_DEPTH = 40.0        # p.288、②p.198：通常 15~40%
+CHEAT_MAX_DEPTH_BEAR = 50.0   # 大盤本身修正很深時才放寬到 50%
 CHEAT_PAUSE_MAX = 10.0        # 停頓區高低幅度 5~10%
 CHEAT_RECOV = (0.25, 0.70)    # 收復跌幅 1/3~1/2；下 1/3 是「低位作弊」(②p.202)，上 1/3 屬一般柄部，交給 VCP
 
@@ -458,17 +462,23 @@ def get_fundamentals(symbol, price, tw_rev=None, deep=False):
     key = (symbol, deep)
     if key in _FUND_CACHE:
         return _FUND_CACHE[key]
-    res = {"line": "財報無資料", "badges": [], "warn": [], "score": 0, "meets_min": None, "strong": False, "earn_days": None}
+    res = {"line": "財報無資料", "badges": [], "warn": [], "score": 0, "meets_min": None, "strong": False, "earn_days": None,
+           "eps_hist": [], "last_split": None}
     try:
         tk = yf.Ticker(symbol)
         try:
             info = tk.info or {}
         except Exception:
             info = {}
+        try:                                             # 最近一次股票分割／配股日（本益比擴張要避開）
+            if info.get("lastSplitDate"):
+                res["last_split"] = pd.Timestamp(int(info["lastSplitDate"]), unit="s").normalize()
+        except Exception:
+            pass
 
         eps_q, surprises = [], []
         try:
-            ed = tk.get_earnings_dates(limit=16)
+            ed = tk.get_earnings_dates(limit=28)
             if ed is not None and len(ed):
                 ed = ed.sort_index(ascending=False)
                 try:                                     # 下一次財報日（②p.143）
@@ -486,6 +496,16 @@ def get_fundamentals(symbol, price, tw_rev=None, deep=False):
                 if ecol is not None:
                     rep = ed[ed[ecol].notna()]
                     eps_q = [float(x) for x in rep[ecol].tolist()]
+                    try:                                 # 帶公布日的歷史 EPS（由新到舊），算本益比擴張用
+                        ridx = pd.DatetimeIndex(rep.index)
+                        if ridx.tz is not None:
+                            ridx = ridx.tz_localize(None)
+                        seen = {}
+                        for d, e in zip(ridx, eps_q):
+                            seen.setdefault(d.normalize(), e)        # 同一天重複的列只留一筆
+                        res["eps_hist"] = sorted(seen.items(), key=lambda x: x[0], reverse=True)
+                    except Exception:
+                        pass
                     if scol is not None:
                         surprises = [float(x) for x in rep[scol].tolist() if pd.notna(x)]
         except Exception:
@@ -964,13 +984,15 @@ def check_my_holdings(raw_data):
             if np.isfinite(ma50) and pnl > 0 and ma50 >= breakeven and c_now > ma50 > stop:
                 notes.append(f"50 日線 {ma50:.2f} 已高於成本 → 可改用「收盤跌破 50 日線」當出場點（②p.245）")
 
+            # 底部計數（p.108、②p.229）：判斷處在這波漲勢的初期還是後期
+            nb, nb_known, first_bar = (None, False, None)
+            if n >= 260:
+                nb, nb_known, first_bar = count_bases(c, rc, df['Close'].rolling(200).mean().values)
+
             # ②p.235-252：急漲是續抱還是該趁強賣，取決於處在初期還是後期
             if n > 80 and pnl > 0:
                 sf = strength_flags(h, l, c, v)
                 if sf and (sf["climax"] or sf["mvp"]):
-                    nb, nb_known = (None, False)
-                    if n >= 260:
-                        nb, nb_known = count_bases(c, rc, df['Close'].rolling(200).mean().values)
                     held = (n - e) if e is not None else None
                     desc = f"近 {sf['bk']} 天漲 {sf['best']:.0f}%"
                     if sf["wr"]:
@@ -987,11 +1009,20 @@ def check_my_holdings(raw_data):
                         desc += " → 若已到後期是趁強賣出訊號，初期底部則續抱（②p.239、p.249）"
                     notes.append("⚡ " + desc)
 
-            # ②p.143：財報前沒有獲利緩衝就不抱大部位
+            # ②p.143：財報前沒有獲利緩衝就不抱大部位；②p.233：本益比擴張
             try:
-                ed = get_fundamentals(sym, c_now).get("earn_days")
+                fnd = get_fundamentals(sym, c_now)
             except Exception:
-                ed = None
+                fnd = {}
+            ed = fnd.get("earn_days")
+            if first_bar is not None:
+                try:
+                    pe = pe_expansion(fnd.get("eps_hist"), df.index[first_bar], float(rc[first_bar]), float(rc[-1]),
+                                      fnd.get("last_split"), df.index[-1])
+                except Exception:                         # [pe-guard] 算不出來不影響其他檢查
+                    pe = None
+                if pe and "skip" not in pe and pe["ratio"] >= PE_EXPANSION_WARN:
+                    notes.append(pe_text(pe, nb_known) + " → 要特別留意賣出訊號")
             if ed is not None and 0 <= ed <= EARNINGS_WARN_DAYS:
                 when = "今天" if ed == 0 else f"約 {ed} 天後"
                 if pnl < EARNINGS_CUSHION_PCT:
@@ -1084,6 +1115,7 @@ def analyze_base(h, l, c, v, v50, atr_pct, end, m=None):
                 rel2 = len(old) - 1 - int(np.argmax(old[::-1]))
                 cand2 = start + rel2
                 ok = (h[cand] <= h[cand2] * (1 + POKE_MAX_PCT / 100.0)
+                      and (cand - cand2) >= MIN_BASE_DAYS            # 試探之前，底部已經整理滿 3 週
                       and (h[cand2] - l[cand2:cand + 1].min()) / h[cand2] * 100.0 >= MIN_BASE_DEPTH)
             if not ok:
                 _BASE_REJECT = "recent_high"
@@ -1251,7 +1283,8 @@ def analyze_base(h, l, c, v, v50, atr_pct, end, m=None):
         "compressed": bool(compressed),
         "orderly": bool(orderly),
         "rel_depth": rel_depth,
-        "footprint": f"{weeks}W {base_depth:.0f}/{shown_final:.0f} {t_label}",   # 時間／最深修正／最近一次／收縮次數
+        # 足跡：時間／整個底部最深的修正／最近一次／收縮次數（試探過舊高的，從試探高點起算）
+        "footprint": f"{weeks}W {(base_top - base_low) / base_top * 100.0:.0f}/{shown_final:.0f} {t_label}",
         "depth_str": "→".join(f"{d:.0f}" for d in depths),
     }
 
@@ -1286,7 +1319,7 @@ def detect_power_play(h, l, c, v, n):
             "corr": float(corr), "tight": tight, "days": int(days)}
 
 
-def detect_cheat(h, l, c, v, v50, end):
+def detect_cheat(h, l, c, v, v50, end, m=None):
     """p.286-290 3C（杯狀完成騙局）：下跌 → 回升收復跌幅 1/3~1/2 → 停頓區（幅度 5~10%、量縮）→ 突破停頓區高點。
     這是書中「最早的進場點」，位置在杯子的中段或下段，所以不要求站上 50 日線。"""
     if end < 150:
@@ -1304,8 +1337,10 @@ def detect_cheat(h, l, c, v, v50, end):
             continue
         li = cand + int(np.argmin(l[cand:end]))
         depth = (h[cand] - l[li]) / h[cand] * 100.0
-        if depth > CHEAT_MAX_DEPTH:
-            continue
+        dd = _market_drop(m, cand, end)                 # 同期大盤從高點回落多少
+        cap = CHEAT_MAX_DEPTH if dd is None else min(CHEAT_MAX_DEPTH_BEAR, max(CHEAT_MAX_DEPTH, 2.5 * dd))
+        if depth > cap:
+            return None                                  # 從 45 週內高點算起修正過深：不改用更小的視窗硬找一個淺杯
         if depth < CHEAT_MIN_DEPTH:
             return None
         p0, lo_i = cand, li
@@ -1314,6 +1349,8 @@ def detect_cheat(h, l, c, v, v50, end):
         return None
     cup_high, cup_low = float(h[p0]), float(l[lo_i])
     depth = (cup_high - cup_low) / cup_high * 100.0
+    mdd = _market_drop(m, p0, end)
+    rel_depth = (depth / mdd) if (mdd is not None and mdd >= 5.0) else None
 
     best = None
     for k in range(5, 21):                               # 停頓區：數天到數週
@@ -1338,7 +1375,7 @@ def detect_cheat(h, l, c, v, v50, end):
     dry = float(v[end - 5:end].mean()) <= 0.8 * vb or float(v[end - 5:end].min()) <= 0.5 * vb
     mid = l[lo_i + 1:end - k]
     shake = bool(len(mid) > 0 and plo < float(mid[-min(len(mid), 15):].min()))
-    return {"pivot": phi, "pause_low": plo, "lo_i": int(lo_i), "depth": depth, "recov": recov * 100.0, "pause_days": k,
+    return {"pivot": phi, "pause_low": plo, "lo_i": int(lo_i), "depth": depth, "rel_depth": rel_depth, "recov": recov * 100.0, "pause_days": k,
             "pause_range": (phi - plo) / phi * 100.0, "dry": bool(dry), "shake": shake,
             "weeks": max(1, int(round((last - p0) / 5.0)))}
 
@@ -1372,11 +1409,11 @@ def detect_primary_base(h, l, c, v, n):
 
 def count_bases(c, rc, ma200):
     """p.108-110 底部計數（估算）：自最後一次「持續跌破 200 日線」之後，數出幾個「整理 ≥4 週、回檔 ≥8% 後再創高」的底部。
-    回傳 (目前是第幾個, 起點是否確定)。第二階段若在資料視窗之前就開始，只能給下限。"""
+    回傳 (目前是第幾個, 起點是否確定, 第一個底部完成並創新高的 K 棒位置或 None)。第二階段若在資料視窗之前就開始，只能給下限。"""
     n = len(c)
     valid = np.where(np.isfinite(ma200))[0]
     if len(valid) < 60:
-        return None, False
+        return None, False, None
     first = int(valid[0])
     below = (rc[first:] < ma200[first:]).astype(float)
     sustained = np.convolve(below, np.ones(20), mode="full")[:len(below)] >= 10
@@ -1384,15 +1421,65 @@ def count_bases(c, rc, ma200):
     known = len(idx) > 0
     s = first + int(idx[-1]) if known else first
     run_max, last_hi, trough, done = c[s], s, c[s], 0
+    first_bar = None                                      # 第一個底部完成、再創新高的那根 K 棒
     for i in range(s + 1, n):
         if c[i] > run_max:
             if (i - last_hi) >= 20 and (run_max - trough) / run_max >= 0.08:
                 done += 1
+                if done == 1:
+                    first_bar = i
             run_max, last_hi, trough = c[i], i, c[i]
         elif c[i] < trough:
             trough = c[i]
     in_base = (n - 1 - last_hi) >= 10 and (run_max - trough) / run_max >= 0.05
-    return done + (1 if in_base else 0), known
+    return done + (1 if in_base else 0), known, first_bar
+
+
+def pe_text(pe, known):
+    """本益比擴張的提示文字。known=False 表示第二階段起點早於資料範圍，只能和資料內最早的底部比。"""
+    ref = "第一個底部" if known else f"近 {HISTORY_MONTHS // 12} 年最早的底部"
+    return (f"⚠️ 本益比約 {pe['then']:.0f}→{pe['now']:.0f} 倍，較{ref}擴張 {pe['ratio']:.1f} 倍"
+            f"（②p.233：超過一倍通常已到上漲後段）")
+
+
+def pe_expansion(eps_hist, d_then, p_then, p_now, last_split=None, d_now=None):
+    """②p.232-235：比較「現在」和「這波漲勢第一個底部當時」的本益比。本益比擴張一倍以上，代表股價漲得比盈餘快很多，
+    通常已到上漲後段。eps_hist = [(財報公布日, 當季 EPS), ...] 由新到舊（Yahoo 的 Reported EPS，多為調整後 EPS；
+    前後用同一種口徑，所以倍數可以比，但絕對值和看盤軟體的本益比不一定相同）。
+    本益比 = 股價 ÷ 該日之前最近四季 EPS 合計。
+    回傳 {"then", "now", "ratio"}；資料不足或可疑時回 {"skip": 原因}（診斷用）；缺必要參數回 None。"""
+    if d_then is None or not p_then or not p_now:
+        return None
+    if not eps_hist or len(eps_hist) < 5:
+        return {"skip": "no_eps"}
+    def day(x):
+        x = pd.Timestamp(x)
+        return (x.tz_localize(None) if x.tzinfo is not None else x).normalize()
+
+    d_now = pd.Timestamp.now().normalize() if d_now is None else day(d_now)
+    d_then = day(d_then)
+    # 期間內有分割／配股時，股價已還原、但歷史 EPS 是否還原無法確認 → 寧可不算，避免假警報
+    if last_split is not None and day(last_split) >= d_then - pd.Timedelta(days=460):
+        return {"skip": "split"}
+
+    def ttm(asof):
+        xs = sorted(((day(d), float(e)) for d, e in eps_hist if day(d) <= asof), key=lambda x: x[0], reverse=True)[:4]
+        if len(xs) < 4 or (asof - xs[0][0]).days > 135:                    # 最新一季不能太舊
+            return None
+        if any(not (45 <= (xs[i][0] - xs[i + 1][0]).days <= 135) for i in range(3)):   # 四季要連續（中間缺一季就不算）
+            return None
+        return sum(e for _, e in xs)
+
+    e_now, e_then = ttm(d_now), ttm(d_then)
+    if e_now is None or e_then is None:
+        return {"skip": "no_eps"}
+    if e_now <= 0 or e_then <= 0:
+        return {"skip": "loss"}                                # 當時或現在虧損，本益比沒有意義
+    pe_now, pe_then = p_now / e_now, p_then / e_then
+    ratio = pe_now / pe_then
+    if not (pe_then <= 1000 and pe_now <= 1000 and 0.1 <= ratio <= 10):   # 太離譜多半是資料問題
+        return {"skip": "odd"}
+    return {"then": float(pe_then), "now": float(pe_now), "ratio": float(ratio)}
 
 
 # ==========================================
@@ -1490,6 +1577,7 @@ def market_regime(s):
 
 
 REGIME_TXT = {"bull": "🟢多頭", "mixed": "🟡整理", "bear": "🔴空頭", "unk": "⚪未知"}
+LAST_DIAG = []      # 最近一次分析的診斷文字（SEND_DIAGNOSTICS 開著時會多傳一則到 Telegram）
 
 
 # ==========================================
@@ -1563,6 +1651,13 @@ def analyze_market(stock_dict, meta, tw_open, uni_info, tstats=None):
     grp_nh = {"tw": defaultdict(int), "us": defaultdict(int)}
     pending = []     # 需要產業群資訊的卡片，掃完後再補
     near_miss = []   # 診斷用
+    pe_ctx = {}      # 代號 → (第一個底部完成日, 當時股價, 現在股價, 起點是否確定, 最後一根 K 棒日期)
+    pe_diag = {"tw": defaultdict(int), "us": defaultdict(int)}   # 算得出來 ok／缺 EPS no_eps／期間有分割 split／虧損 loss／可疑 odd
+    diag = []
+
+    def dprint(x):
+        print(x)
+        diag.append(x)
 
     def industry_of(sym):
         ind = (meta.get(sym) or {}).get("industry")
@@ -1665,10 +1760,17 @@ def analyze_market(stock_dict, meta, tw_open, uni_info, tstats=None):
             long_ok = (np.isfinite(ma200[-1 - MA200_UP_DAYS]) and c_now > ma200[-1]
                        and ma200[-1] > ma200[-1 - MA200_UP_DAYS] and rs >= RS_MIN and c_now >= lo52 * LOW52_MULT)
 
+            # 大盤對齊（修正幅度比較、RS 線）
+            m = None
+            if mkt in indices:
+                m = indices[mkt].reindex(df.index.normalize(), method="ffill").bfill().values.astype(float)
+                if not np.isfinite(m).all():
+                    m = None
+
             # ---------- p.286-290 3C：只要求站在上升的 200 日線之上 ----------
             cheat_item = None
             if long_ok:
-                ch = detect_cheat(h, l, c, v, v50, n - 1)
+                ch = detect_cheat(h, l, c, v, v50, n - 1, m)
                 if ch:                                  # 杯子左側本來就帶量下跌，出貨檢查只看杯底之後
                     lo = ch["lo_i"]
                     dd, bigv = np.diff(c[lo:]), v[lo + 1:] > v50[lo + 1:]
@@ -1684,9 +1786,12 @@ def analyze_market(stock_dict, meta, tw_open, uni_info, tstats=None):
                         state = None
                     if state:
                         extra = ("｜💧量縮" if ch["dry"] else "") + ("｜洗盤✓" if ch["shake"] else "")
+                        if ch.get("rel_depth") and ch["rel_depth"] > REL_DEPTH_WARN:
+                            extra += f"｜⚠️修正為大盤{ch['rel_depth']:.1f}倍"
                         # ②p.202：停頓區在杯子下 1/3 是「低位作弊」，風險較高，書中只先建一部分；中間 1/3 才是 3C
                         kind = "低位作弊(位置低、風險較高，書中只先建部分)" if ch["recov"] < 100.0 / 3 else "3C"
-                        cheat_item = (rs + (15 if ch["dry"] else 0) + (5 if ch["shake"] else 0) - (5 if ch["recov"] < 100.0 / 3 else 0), symbol, (
+                        cheat_item = (rs + (15 if ch["dry"] else 0) + (5 if ch["shake"] else 0) - (5 if ch["recov"] < 100.0 / 3 else 0)
+                                      - (15 if (ch.get("rel_depth") or 0) > REL_DEPTH_WARN else 0), symbol, (
                             f"{head}\n"
                             f"  🥄 <b>{state}</b>{lock_note}\n"
                             f"  {risk_line(max(c_now, ch['pivot']), ch['pause_low'])}\n"
@@ -1720,13 +1825,6 @@ def analyze_market(stock_dict, meta, tw_open, uni_info, tstats=None):
             if distribution:
                 continue
 
-            # 大盤對齊（修正幅度比較、RS 線）
-            m = None
-            if mkt in indices:
-                m = indices[mkt].reindex(df.index.normalize(), method="ffill").bfill().values.astype(float)
-                if not np.isfinite(m).all():
-                    m = None
-
             ma200_up_4m = n > 290 and ma200[-1] > ma200[-44] > ma200[-88]
             score = rs + (15 if rs >= 85 else 0) + (10 if ma200_up_4m else 0) + (15 if c_now >= lo52 * 2 else 0)
             score += max(0, up_days - dn_days) * 4
@@ -1736,7 +1834,9 @@ def analyze_market(stock_dict, meta, tw_open, uni_info, tstats=None):
                 tags.append("⚠️近60日最大量是下跌日")
                 score -= 10
             # 底部計數（p.108-110、②p.229-232）：第 1~2 個最好，第 3~4 個偏晚，第 5 個以後失敗率高
-            nb, nb_known = count_bases(c, rc, ma200)
+            nb, nb_known, first_bar = count_bases(c, rc, ma200)
+            if first_bar is not None:
+                pe_ctx[symbol] = (df.index[first_bar], float(rc[first_bar]), float(rc[-1]), nb_known, df.index[-1])
             if nb and (nb_known or nb >= 3):
                 pre = '' if nb_known else '≥'
                 if nb >= 5:
@@ -1815,15 +1915,22 @@ def analyze_market(stock_dict, meta, tw_open, uni_info, tstats=None):
             # ---------- 第三層：近 10 日內有沒有過「有效突破」（樞紐固定在突破當時）----------
             # 先看這層：已經突破的股票，接下來幾天形成的小高點不算新樞紐，不能拿來當追價的理由。
             placed, fail_note = False, ""
+            bo_stage = 0     # 診斷：近 10 日「收盤越過底部高點」最遠走到哪一關（1 底部未成型 2 未量縮 3 量不足 4 有效突破）
             for kk in range(POST_BREAKOUT_DAYS, 0, -1):
                 b = n - 1 - kk
                 fpb = analyze_base(h, l, c, v, v50, atr_pct, b, m)
-                if not (fpb and fpb["ready"] and fpb["dryup"]):
+                if not fpb:
+                    continue
+                ref_b = fpb["pivot"] if fpb["ready"] else fpb["base_top"]
+                if not (c[b] > ref_b and c[b - 1] <= ref_b):
+                    continue
+                b_locked = bool(lim and (c[b] / c[b - 1] - 1) * 100 >= lim - 0.7 and abs(h[b] - c[b]) < 1e-9)
+                vol_b = bool(v50[b - 1] > 0 and (v[b] >= BREAKOUT_VOL_MULT * v50[b - 1] or b_locked))
+                stage = 1 if not fpb["ready"] else (2 if not fpb["dryup"] else (3 if not vol_b else 4))
+                bo_stage = max(bo_stage, stage)
+                if stage < 4:
                     continue
                 pv = fpb["pivot"]
-                b_locked = bool(lim and (c[b] / c[b - 1] - 1) * 100 >= lim - 0.7 and abs(h[b] - c[b]) < 1e-9)
-                if not (c[b] > pv and c[b - 1] <= pv and v50[b - 1] > 0 and (v[b] >= BREAKOUT_VOL_MULT * v50[b - 1] or b_locked)):
-                    continue
                 dist = (c_now / pv - 1) * 100.0
                 dipped = bool((c[b + 1:n - 1] < pv).any()) if kk > 1 else False
                 stop_b = plan_stop(pv, fpb["danger_low"], cap)[0]
@@ -1844,6 +1951,8 @@ def analyze_market(stock_dict, meta, tw_open, uni_info, tstats=None):
                     fail_note = f"⚠️ {kk}天前突破 {pv:.2f} 失敗，等重設樞紐 (p.295)"
                     continue                                        # 失敗後可能重設樞紐再突破一次 → 繼續往後看
                 break
+
+            stats[f"bo_{bo_stage}"] += 1
 
             # ---------- 第四層：截至昨天的底部 → 今天是否突破、樞紐是否已成型 ----------
             fp = analyze_base(h, l, c, v, v50, atr_pct, n - 1, m)
@@ -1875,7 +1984,7 @@ def analyze_market(stock_dict, meta, tw_open, uni_info, tstats=None):
                                          note=fail_note, entry=c_now))
                     placed = True
                 elif c_now <= pivot and dist >= -STAR_MAX_DIST and fp["dryup"] and c_now >= ma20[-1] * 0.99:
-                    mark = "★◎" if (fp["final"] <= 5.0 or fp["dry_extreme"]) else "★"
+                    mark = "★◎" if fp["final"] <= 5.0 else "★"
                     add("star", card(f"🎯 <b>{mark} 樞紐 {pivot:.2f}</b> (差 {abs(dist):.1f}%)｜突破需量 ≥{BREAKOUT_VOL_MULT}倍", fp, pivot, 20, True,
                                      note=fail_note))
                     placed = True
@@ -1993,6 +2102,21 @@ def analyze_market(stock_dict, meta, tw_open, uni_info, tstats=None):
               "primary": (2, 2), "pb": (5, 4)}
     listed = set()
 
+    def pe_of(sym, f, count=False):
+        """本益比相對第一個底部當時擴張了幾倍；只有已經完成過至少一個底部的股票才需要算。"""
+        if sym not in pe_ctx:
+            return None
+        d_then, p_then, p_now, _, d_now = pe_ctx[sym]
+        try:
+            pe = pe_expansion(f.get("eps_hist"), d_then, p_then, p_now, f.get("last_split"), d_now)
+        except Exception:                                 # [pe-guard] 算不出來不能讓整份日報失敗
+            pe = {"skip": "odd"}
+        if pe is None:
+            return None
+        if count:
+            pe_diag[mkt_of(sym)][pe.get("skip", "ok")] += 1
+        return None if "skip" in pe else pe
+
     def render(key, deep):
         out = []
         for mi, mkt in enumerate(("tw", "us")):
@@ -2004,7 +2128,9 @@ def analyze_market(stock_dict, meta, tw_open, uni_info, tstats=None):
                 if REQUIRE_FUNDAMENTALS and f["meets_min"] is False:
                     continue
                 grp_bonus = 5 if (sym in grp_rank and grp_rank[sym][0] <= 3 and grp_rank[sym][1] >= 3) else 0
-                ranked.append((s + f["score"] + grp_bonus, sym, text, px))
+                pe = pe_of(sym, f)
+                pe_pen = 10 if (pe and pe["ratio"] >= PE_EXPANSION_WARN) else 0
+                ranked.append((s + f["score"] + grp_bonus - pe_pen, sym, text, px))
             ranked.sort(key=lambda x: x[0], reverse=True)
             for s, sym, text, px in ranked[:lim]:
                 f = get_fundamentals(sym, px, tw_open.get(sym), deep=deep)
@@ -2013,21 +2139,26 @@ def analyze_market(stock_dict, meta, tw_open, uni_info, tstats=None):
                 ed = f.get("earn_days")
                 if key != "pb" and ed is not None and 0 <= ed <= EARNINGS_WARN_DAYS:
                     earn = f"\n  📅 財報{'今天' if ed == 0 else f'約 {ed} 天後'}（②p.143：沒有 {EARNINGS_CUSHION_PCT:.0f}% 獲利緩衝不抱大部位過財報）"
+                pe = pe_of(sym, f, count=True)
+                if pe and pe["ratio"] >= PE_EXPANSION_WARN:
+                    earn += "\n  " + pe_text(pe, pe_ctx[sym][3])
                 out.append(text + extra_line.get((key, sym), "") + "\n  💰 " + fund_text(f) + earn)
         return out
 
-    print("🔎 漏斗：" + "｜".join(f"{k}={stats[k]}" for k in ("scanned", "liquid", "pinned", "template", "f1_no_distribution",
+    dprint("🔎 漏斗：" + "｜".join(f"{k}={stats[k]}" for k in ("scanned", "liquid", "pinned", "template", "f1_no_distribution",
           "f1b_recent_breakout_handled", "x_extended_after_breakout", "f2_has_base", "f2b_via_poke", "f3_pivot_ready",
           "f4_ready_near_pivot", "f5_ready_near_dry")))
-    print("🔎 無底部原因：" + "｜".join(f"{k[5:]}={v}" for k, v in sorted(stats.items()) if k.startswith("none_")))
-    print("🔎 有底部但樞紐未成型：" + "｜".join(f"{k[3:]}={v}" for k, v in sorted(stats.items()) if k.startswith("nr_")))
-    print("🔎 出貨濾網(可重複)：" + "｜".join(f"{k[2:]}={v}" for k, v in sorted(stats.items()) if k.startswith("d_"))
-          + f"｜僅警示不剔除：maxvol_down={stats['w_maxvol_down']}｜rsline_down={stats['w_rsline_down']}")
+    dprint("🔎 無底部原因：" + "｜".join(f"{k[5:]}={v}" for k, v in sorted(stats.items()) if k.startswith("none_")))
+    dprint("🔎 有底部但樞紐未成型：" + "｜".join(f"{k[3:]}={v}" for k, v in sorted(stats.items()) if k.startswith("nr_")))
+    dprint("🔎 出貨濾網(可重複)：" + "｜".join(f"{k[2:]}={v}" for k, v in sorted(stats.items()) if k.startswith("d_"))
+           + f"｜僅警示不剔除：maxvol_down={stats['w_maxvol_down']}｜rsline_down={stats['w_rsline_down']}")
+    dprint(f"🔎 近10日收盤越過底部高點，最遠走到：沒有越過={stats['bo_0']}｜底部未成型={stats['bo_1']}｜成型但未量縮={stats['bo_2']}"
+           f"｜量縮但突破量不足={stats['bo_3']}｜有效突破={stats['bo_4']}")
     if near_miss:
         near_miss.sort(key=lambda x: x[0])
-        print(f"🔎 差一步名單（有底部、離參考高點 8% 內、沒進一~五類；共 {len(near_miss)} 檔，列最近的 25 檔）：")
+        dprint(f"🔎 差一步名單（有底部、離參考高點 8% 內、沒進一~五類；共 {len(near_miss)} 檔，列最近的 25 檔）：")
         for _, txt in near_miss[:25]:
-            print("   " + txt)
+            dprint("· " + txt)
     print("💰 產生日報...")
     sections = [
         ("🚀 <b>【一、今日帶量突破樞紐】</b>", render("brk", True)),
@@ -2051,6 +2182,11 @@ def analyze_market(stock_dict, meta, tw_open, uni_info, tstats=None):
     sections.append(("💥 <b>【九、基本面強＋帶量創高（觀察，非買點）】</b>", beat))
 
     holdings_msg = check_my_holdings(raw_data) + trade_stats_text(tstats, rba_cap)
+    dprint("🔎 本益比擴張（卡片中已完成過底部的）：" + "｜".join(
+        f"{MARKET_CFG[k]['name']} 算得出={pe_diag[k]['ok']} 缺EPS={pe_diag[k]['no_eps']} 期間有分割={pe_diag[k]['split']}"
+        f" 虧損={pe_diag[k]['loss']} 可疑={pe_diag[k]['odd']}" for k in ("us", "tw")))
+    global LAST_DIAG
+    LAST_DIAG = diag
 
     # ---------- 表頭 ----------
     mk = []
@@ -2075,3 +2211,5 @@ if __name__ == "__main__":
     tw_open = fetch_tw_open_data()
     holdings_msg, header, sections = analyze_market(stock_dict, meta, tw_open, uni_info, load_trade_stats())
     send_reports(holdings_msg, header, sections)
+    if SEND_DIAGNOSTICS and LAST_DIAG:
+        send_telegram_msg("🔧 診斷（調整期間用，整則轉貼或截圖給我即可）\n" + html.escape("\n".join(LAST_DIAG)))
