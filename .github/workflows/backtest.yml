@@ -1,0 +1,53 @@
+# 回測（手動執行）：Actions 頁面 → 左側選「Backtest」→ Run workflow
+# 這個檔案要放在 .github/workflows/ 裡，和每日選股的那個 yml 放在一起。
+name: Backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      months:
+        description: "下載幾個月的歷史（預設 60 個月，約可回測 3.7 年）"
+        required: false
+        default: "60"
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: 1. 取得程式
+        uses: actions/checkout@v4
+
+      - name: 2. 安裝 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 3. 安裝套件
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install yfinance pandas numpy requests lxml html5lib beautifulsoup4
+
+      - name: 4. 取回美股清單快取（只讀取，不更新）
+        uses: actions/cache/restore@v4
+        with:
+          path: us_universe_cache.json
+          key: us-universe-backtest
+          restore-keys: |
+            us-universe-
+
+      - name: 5. 執行回測
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BT_MONTHS: ${{ github.event.inputs.months }}
+        run: python backtest.py
+
+      - name: 6. 保存明細檔（Telegram 沒收到時可以從這裡下載）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-events
+          path: backtest_events.zip
+          if-no-files-found: ignore
