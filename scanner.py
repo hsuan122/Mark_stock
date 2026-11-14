@@ -524,7 +524,7 @@ def get_fundamentals(symbol, price, tw_rev=None, deep=False):
             parts.append(f"四季EPS <b>{float(info['trailingEps']):.2f}</b>")
         if meaningful:
             if len(g) >= 3 and all(x is not None for x in g[:3]):
-                parts.append(f"EPS年增 <b>{g[2]:+.0f}→{g[1]:+.0f}→{g[0]:+.0f}%</b>")
+                parts.append(f"近三季EPS年增 <b>{g[2]:+.0f}%→{g[1]:+.0f}%→{g[0]:+.0f}%</b>")
             else:
                 parts.append(f"EPS年增 <b>{g0:+.0f}%</b>")
         elif tiny:
@@ -781,9 +781,14 @@ def _market_drop(m, a, b):
     return float((seg[k] - seg[k:].min()) / seg[k] * 100.0)
 
 
+_BASE_REJECT = ""
+
+
 def analyze_base(h, l, c, v, v50, atr_pct, end, m=None):
     """分析 [0, end) 這段 K 棒形成的底部（end 那根不算，用來判斷「end 當天是否突破」）。
     m = 對齊後的大盤收盤價（可省略）。回傳 None = 沒有可辨識的底部（剛創高、太深、太短又太深…）。"""
+    global _BASE_REJECT
+    _BASE_REJECT = "short_history"
     if end < 80:
         return None
     last = end - 1
@@ -796,6 +801,7 @@ def analyze_base(h, l, c, v, v50, atr_pct, end, m=None):
         cand = start + rel
         days = last - cand
         if days < MIN_BASE_DAYS:
+            _BASE_REJECT = "recent_high"
             return None                                   # 高點太近 → 還在延伸段，不是買點
         if start > 0 and rel < 3:
             continue                                      # 視窗邊緣的假高點
@@ -805,12 +811,15 @@ def analyze_base(h, l, c, v, v50, atr_pct, end, m=None):
         if depth > cap:
             continue                                      # 太深，改看較近期的底部
         if days < SHORT_BASE_DAYS and depth > SHORT_BASE_MAX_DEPTH:
+            _BASE_REJECT = "short_but_deep"
             return None                                   # p.311：短底部不該修正這麼深
         if depth < MIN_BASE_DEPTH:
+            _BASE_REJECT = "too_shallow"
             return None
         p0, mkt_dd = cand, dd
         break
     if p0 is None:
+        _BASE_REJECT = "too_deep"
         return None
 
     base_high = float(h[p0])
@@ -841,6 +850,7 @@ def analyze_base(h, l, c, v, v50, atr_pct, end, m=None):
         else:
             i += 1
     if not cons:
+        _BASE_REJECT = "no_swing"
         return None
 
     depths = [x[3] for x in cons]
@@ -1283,12 +1293,13 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
             dn_days = int((big40 & (diff40 < 0)).sum())
             imax = n - 60 + int(np.argmax(v[-60:]))
             s3 = stage3_flags(c, v, v50, recent=15)
-            distribution = (
-                c[imax] < c[imax - 1] * 0.98                       # 近 60 日最大量那天是大跌
-                or (c_now < c_prev * 0.985 and vol_ratio >= 1.35)  # 今天帶量下跌
-                or dn_days > up_days + 1                           # 大量下跌日明顯較多
-                or s3 is not None                                  # 一年來最大跌幅且爆量
-            )
+            d_rules = {
+                "d_maxvol_down": c[imax] < c[imax - 1] * 0.98,                    # 近 60 日最大量那天是大跌
+                "d_today_heavy_down": c_now < c_prev * 0.985 and vol_ratio >= 1.35,  # 今天帶量下跌
+                "d_more_down_days": dn_days > up_days + 1,                         # 大量下跌日明顯較多
+                "d_stage3": s3 is not None,                                        # 一年來最大跌幅且爆量
+            }
+            distribution = any(d_rules.values())
 
             # ---------- p.298 強勁表現型態（書中明言不要求基本面，但要守供需法則）----------
             pp = detect_power_play(h, l, c, v, n)
@@ -1349,6 +1360,8 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
                     cats["cheat"][mkt].append(cheat_item)
                 continue
             stats["template"] += 1
+            for dk, dv in d_rules.items():
+                stats[dk] += int(bool(dv))
             grp_pass[mkt][ind].append((rs, symbol))
 
             if is_red and vol_ok and c_now >= h[-20:-1].max() and not distribution:
@@ -1418,6 +1431,12 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
             fp = analyze_base(h, l, c, v, v50, atr_pct, n - 1, m)
             placed, fail_note = False, ""
             stats["f1_no_distribution"] += 1
+            if fp is None:
+                stats["none_" + _BASE_REJECT] += 1
+                if _BASE_REJECT == "recent_high" and n > 120:
+                    # 新高只比 3 週前的舊高多一點 → 可能是舊底部上緣的試探，而不是真的在延伸
+                    if h[-16:].max() <= h[-325:-16].max() * 1.03:
+                        stats["none_recent_high_poke"] += 1
             if fp:
                 stats["f2_has_base"] += 1
                 if fp["ready"]:
@@ -1594,6 +1613,8 @@ def analyze_market(stock_dict, meta, tw_open, uni_info):
 
     print("🔎 漏斗：" + "｜".join(f"{k}={stats[k]}" for k in ("scanned", "liquid", "pinned", "template", "f1_no_distribution",
           "f2_has_base", "f3_pivot_ready", "f4_ready_near_pivot", "f5_ready_near_dry")))
+    print("🔎 無底部原因：" + "｜".join(f"{k[5:]}={v}" for k, v in sorted(stats.items()) if k.startswith("none_")))
+    print("🔎 出貨濾網(可重複)：" + "｜".join(f"{k[2:]}={v}" for k, v in sorted(stats.items()) if k.startswith("d_")))
     print("💰 產生日報...")
     sections = [
         ("🚀 <b>【一、今日帶量突破樞紐】</b>", render("brk", True)),
