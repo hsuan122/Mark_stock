@@ -75,7 +75,7 @@ FOLLOW_DAYS = 10              # ②p.46：突破後第 1~2 週觀察跟進買盤
 TRADES_FILE = os.environ.get("TRADES_FILE", "trades.csv")   # 已平倉交易紀錄；沒有這個檔就不顯示統計
 TRADE_STATS_MIN_N = 20        # 自訂：累積到這個筆數，才用「平均獲利的一半」限制卡片停損上限（②p.86）
 PE_EXPANSION_WARN = 2.0       # ②p.233：本益比比第一個底部當時擴張一倍以上 → 已到上漲後段
-SEND_DIAGNOSTICS = True       # 調整期間多傳一則診斷訊息到 Telegram；穩定後改成 False
+SEND_DIAGNOSTICS = False      # 改成 True 會多傳一則「🔧 診斷」訊息到 Telegram（調整程式時才需要）
 SHOW_EMPTY_SECTIONS = True    # 沒有股票的類別也列出標題並寫「今天沒有」；看熟了改成 False，就只列有股票的類別
 SHOW_SECTION_HELP = True      # 每個類別標題下面加一句白話說明；看熟了改成 False
 
