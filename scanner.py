@@ -1,5 +1,5 @@
 """
-《超級績效》SEPA / VCP 選股雷達  v4.2 —— 依《超級績效》第 3~13 章與《超級績效 2》第 1~10 章校正，台股／美股分流
+《超級績效》SEPA / VCP 選股雷達  v4.3 —— 依《超級績效》第 3~13 章與《超級績效 2》第 1~10 章校正，台股／美股分流
 
 書中規則對照（頁碼為中譯本）：
   第 3 章  p.54   評等程序：先過趨勢樣板 → 再用盈餘/營收/利潤率/相對強度過濾 → 人工檢視
@@ -28,6 +28,7 @@
 """
 import os
 import io
+import subprocess
 import json
 import time
 import html
@@ -78,6 +79,11 @@ PE_EXPANSION_WARN = 2.0       # ②p.233：本益比比第一個底部當時擴�
 SEND_DIAGNOSTICS = False      # 改成 True 會多傳一則「🔧 診斷」訊息到 Telegram（調整程式時才需要）
 SHOW_EMPTY_SECTIONS = True    # 沒有股票的類別也列出標題並寫「今天沒有」；看熟了改成 False，就只列有股票的類別
 SHOW_SECTION_HELP = True      # 每個類別標題下面加一句白話說明；看熟了改成 False
+PAPER_LEDGER = True           # 紙上帳本：每天把日報一、二、三、五類的訊號記進 paper_ledger.csv，之後自動對答案。只記帳，不會下單
+LEDGER_FILE = "paper_ledger.csv"
+LEDGER_HOLD_DAYS = 20         # 紙上買進後最多抱幾個交易日（和回測「抱 20 天」同一把尺）
+LEDGER_SLIP_PCT = 0.1         # 掛單在樞紐價成交時多付的滑價（和回測相同）
+LEDGER_DEDUP_BARS = 10        # 同一檔股票 10 個交易日內只紙上買一次（和回測相同）
 
 # --- 市場別設定（台股／美股分開）---
 MARKET_CFG = {
@@ -1542,7 +1548,7 @@ def _section_key(title):
     return title[i + 1:j] if 0 <= i < j else ""
 
 
-def send_reports(holdings_msg, header, sections):
+def send_reports(holdings_msg, header, sections, tail=None):
     blocks = []
     for title, items in sections:
         if not items and not SHOW_EMPTY_SECTIONS:
@@ -1556,6 +1562,7 @@ def send_reports(holdings_msg, header, sections):
             blocks.extend(items)
         else:
             blocks.append(head + "\n" + EMPTY_SECTION_TEXT)                # 標題、說明、「今天沒有」放同一塊，換頁時不會被拆開
+    blocks.extend(b for b in (tail or []) if b)                           # 紙上帳本等附加區塊，接在九個類別後面
     if not blocks:
         send_telegram_msg(holdings_msg + header + "\n今天沒有符合條件的標的。")
         return
@@ -1611,6 +1618,264 @@ def market_regime(s):
 
 REGIME_TXT = {"bull": "🟢多頭", "mixed": "🟡整理", "bear": "🔴空頭", "unk": "⚪未知"}
 LAST_DIAG = []      # 最近一次分析的診斷文字（SEND_DIAGNOSTICS 開著時會多傳一則到 Telegram）
+LAST_SIGNALS = []   # 最近一次日報「實際列出來」的一、二、三、五類訊號（紙上帳本用）
+LAST_PRICES = {}    # 最近一次下載的 K 線（紙上帳本對答案用）
+
+
+# ==========================================
+# 9b. 紙上帳本：把日報的訊號往後追蹤、自動對答案（只記帳，不會下單，也沒有下單的程式碼）
+#     進出場規則和 backtest.py 的「抱 20 天」完全相同，這樣往後累積的結果才能和回測放在一起比。
+# ==========================================
+LEDGER_COLS = ["date", "mkt", "sym", "name", "kind", "mode", "close", "pivot", "danger_low", "cap", "rs",
+               "status", "entry_date", "entry", "stop", "exit_date", "exit", "ret", "days", "note"]
+LEDGER_SEC = {"brk": "一", "recent": "二", "star": "三", "cheat": "五"}
+LEDGER_SKIP_TEXT = {"no_trigger": "隔天沒漲過樞紐", "gap_over_limit": "開太高、超過追價上限", "locked_limit_up": "漲停鎖住買不到",
+                    "dup": "同一檔 10 天內已紙上買過", "no_data": "後來抓不到資料"}
+
+
+def _market_now(is_tw):
+    return datetime.now(ZoneInfo("Asia/Taipei" if is_tw else "America/New_York"))
+
+
+def session_closed(bar_date, is_tw):
+    """這根日 K 是不是已經收盤、資料已定案。收盤後多等一段時間（台股到 14:00、美股到 16:20），讓報價來源更新完。"""
+    try:
+        now = _market_now(is_tw)
+        d = pd.Timestamp(bar_date).date()
+        if d != now.date():
+            return d < now.date()
+        return (now.hour * 60 + now.minute) >= (14 * 60 if is_tw else 16 * 60 + 20)
+    except Exception:
+        return False
+
+
+def _ledger_path():
+    return os.environ.get("PAPER_LEDGER_FILE") or os.path.join(os.path.dirname(os.path.abspath(__file__)), LEDGER_FILE)
+
+
+def _day(x):
+    return pd.Timestamp(x).strftime("%Y-%m-%d")
+
+
+def load_ledger(path):
+    """讀不懂就丟出例外（主程式會跳過帳本、保留原檔），不會用空白帳本蓋掉舊紀錄。"""
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return []
+    df = pd.read_csv(path, dtype=str, keep_default_na=False, encoding="utf-8")
+    lost = [c for c in ("date", "mkt", "sym", "kind", "mode", "close", "pivot", "status") if c not in df.columns]
+    if lost:
+        raise ValueError(f"{os.path.basename(path)} 缺少欄位 {lost}")
+    for c in LEDGER_COLS:
+        if c not in df.columns:
+            df[c] = ""
+    return df[LEDGER_COLS].to_dict("records")
+
+
+def save_ledger(path, rows):
+    tmp = path + ".tmp"
+    pd.DataFrame(rows, columns=LEDGER_COLS).to_csv(tmp, index=False, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _ledger_frame(df, is_tw):
+    """只留「已收盤」的 K 棒，回傳 (日期, o, h, l, c)（連續化價格，和型態分析、回測用的相同）；資料不夠回傳 None。"""
+    n = len(df)
+    if n and not session_closed(df.index[-1], is_tw):
+        n -= 1                                            # 最後一根還在盤中 → 不拿來對答案
+    if n < 2:
+        return None
+    d = df.iloc[:n]
+    o, h, l, c, _, _ = heal_series(d, is_tw)
+    return d.index.normalize(), o, h, l, c
+
+
+def ledger_eval(row, frame, is_tw):
+    """替一筆紀錄算出現在的狀態，規則同 backtest.simulate（抱 20 天那一組）：
+    訊號隔天進場（open＝開盤價；trigger＝當天漲過樞紐才成交，價格取開盤與樞紐較高者再加滑價）；
+    一字漲停買不到、超過追價上限不追；停損＝plan_stop(進場價, 危險點, 上限)；進場當天就碰到停損也算停損；
+    跳空跌破停損以開盤價出場；沒停損就在第 20 個交易日收盤出場。回傳要更新的欄位；還沒有下一根 K 棒回傳 {}。"""
+    dates, o, h, l, c = frame
+    n = len(c)
+    cfg = MARKET_CFG["tw" if is_tw else "us"]
+    day = pd.Timestamp(row["date"]).normalize()
+    t = int(dates.get_indexer([day])[0])
+    if t < 0:                                             # 訊號那天不在資料裡：先等幾天，還是沒有就放棄
+        return {"status": "skipped", "note": "no_data"} if (dates[-1] - day).days > 10 else {}
+    close0, pivot0 = _num(row["close"]), _num(row["pivot"])
+    if not close0 or not pivot0 or close0 <= 0 or not np.isfinite(c[t]) or c[t] <= 0:
+        return {"status": "skipped", "note": "no_data"}
+    f = float(c[t]) / close0                              # 之後若有除權息或分割，價格基準會變；用訊號當天的收盤把樞紐換算到現在的基準
+    pivot = pivot0 * f
+    danger = _num(row["danger_low"])
+    danger = danger * f if danger else None
+    e = t + 1
+    if e >= n:
+        return {}
+    P = float(o[e])
+    if not np.isfinite(P) or P <= 0:
+        return {"status": "skipped", "note": "no_data"}
+    gap_pct = (P / float(c[t]) - 1) * 100.0
+    if row["mode"] == "trigger":
+        if not (h[e] > pivot):
+            return {"status": "skipped", "note": "no_trigger", "entry_date": _day(dates[e])}
+        P = max(P, pivot) * (1 + LEDGER_SLIP_PCT / 100.0)
+    lim = cfg.get("limit_pct")
+    if lim and gap_pct >= lim - 0.7 and abs(h[e] - l[e]) < 1e-9:
+        return {"status": "skipped", "note": "locked_limit_up", "entry_date": _day(dates[e])}
+    if P > pivot * (1 + CHASE_LIMIT_PCT / 100.0):
+        return {"status": "skipped", "note": "gap_over_limit", "entry_date": _day(dates[e])}
+    sp, _, _ = plan_stop(P, danger, _num(row["cap"]) or MAX_STOP_PCT)
+    cost = cfg["cost_buy_pct"] + cfg["cost_sell_pct"]
+    out = {"entry_date": _day(dates[e]), "entry": round(P / f, 4), "stop": round(sp / f, 4)}
+    hit = np.flatnonzero(l[e:min(n, e + LEDGER_HOLD_DAYS)] <= sp)
+    if len(hit):
+        k = int(hit[0])
+        px = sp if k == 0 else min(float(o[e + k]), sp)   # 跳空跌破停損 → 以開盤價出場
+        out.update(status="closed", note="stop", exit_date=_day(dates[e + k]), exit=round(px / f, 4), days=k + 1)
+    elif e + LEDGER_HOLD_DAYS - 1 < n:
+        x = e + LEDGER_HOLD_DAYS - 1
+        px = float(c[x])
+        out.update(status="closed", note="time", exit_date=_day(dates[x]), exit=round(px / f, 4), days=LEDGER_HOLD_DAYS)
+    else:
+        px = float(c[n - 1])                              # 還在抱：用最新收盤算目前損益
+        out.update(status="open", note="", exit_date="", exit="", days=n - e)
+    out["ret"] = round((px / P - 1) * 100.0 - cost, 4)
+    return out
+
+
+def _git_stage(path):
+    """在 GitHub Actions 上把帳本加入待提交清單；工作流程最後一步的「自動打卡」會把它一起存回 repo。"""
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return
+    try:
+        subprocess.run(["git", "add", "--", os.path.basename(path)], cwd=os.path.dirname(os.path.abspath(path)),
+                       timeout=30, check=False, capture_output=True)
+    except Exception as e:
+        print(f"紙上帳本沒有加入提交清單: {e}")
+
+
+def ledger_summary(rows, n_new, not_final):
+    """日報最後那一塊文字。"""
+    by = defaultdict(list)
+    for r in rows:
+        by[r["status"]].append(r)
+    closed, opened, pend, skipped = by["closed"], by["open"], by["pending"], by["skipped"]
+    hold = LEDGER_HOLD_DAYS
+    out = ["📒 <b>【紙上帳本】</b>照日報訊號「紙上買進」的累積結果（沒有真的下單）",
+           f"💬 已經突破的（一、二類）隔天開盤買；還在等突破的（三、五類）隔天漲過樞紐才買。停損算法和卡片相同，最多抱 {hold} 個交易日。",
+           f"今天新記 {n_new} 筆｜等隔天 {len(pend)} 筆｜進行中 {len(opened)} 筆｜已結束 {len(closed)} 筆"]
+    if not_final:
+        out.append("（" + "、".join(MARKET_CFG[m]["name"] for m in sorted(not_final)) + "還沒收盤，這次的訊號先不記）")
+
+    def stat(rs):
+        v = np.array([_num(r["ret"]) or 0.0 for r in rs])
+        w, lo = v[v > 0], v[v <= 0]
+        s = f"{len(v)} 筆｜勝率 {len(w) / len(v) * 100:.0f}%｜平均每筆 {v.mean():+.1f}%"
+        if len(w):
+            s += f"｜賺的平均 {w.mean():+.1f}%"
+        if len(lo):
+            s += f"｜賠的平均 {lo.mean():+.1f}%"
+        return s
+
+    if closed:
+        out.append("已結束：" + stat(closed) + ("（不到 30 筆，先當參考）" if len(closed) < 30 else ""))
+        parts = []
+        for kind, sec in LEDGER_SEC.items():
+            rs = [r for r in closed if r["kind"] == kind]
+            if rs:
+                v = np.array([_num(r["ret"]) or 0.0 for r in rs])
+                parts.append(f"{sec}類 {len(rs)} 筆 {v.mean():+.1f}%")
+        if len(parts) > 1:
+            out.append("　" + "｜".join(parts))
+    else:
+        out.append(f"已結束：還沒有（要等停損出場，或抱滿 {hold} 個交易日）")
+    if opened:
+        out.append("進行中：")
+        opened = sorted(opened, key=lambda r: (-(int(_num(r["days"]) or 0)), r["sym"]))
+        for r in opened[:8]:
+            flag = "🇹🇼" if r["mkt"] == "tw" else "🇺🇸"
+            out.append(f"　{flag} {html.escape(r['sym'])}（{LEDGER_SEC.get(r['kind'], '?')}類）{_num(r['ret']) or 0.0:+.1f}%・第 {int(_num(r['days']) or 0)} 天")
+        if len(opened) > 8:
+            out.append(f"　…另有 {len(opened) - 8} 筆")
+    if skipped:
+        cnt = defaultdict(int)
+        for r in skipped:
+            cnt[r["note"]] += 1
+        out.append(f"沒買到 {len(skipped)} 筆：" + "｜".join(f"{LEDGER_SKIP_TEXT.get(k, k)} {v}" for k, v in sorted(cnt.items(), key=lambda x: -x[1])))
+    return "\n".join(out)
+
+
+def ledger_watch_symbols(path=None):
+    """帳本裡還沒結束的股票。主程式會把它們加進下載清單，免得哪天掉出股票池就對不了答案。"""
+    try:
+        return {r["sym"]: (r.get("name") or r["sym"]) for r in load_ledger(path or _ledger_path()) if r["status"] in ("pending", "open")}
+    except Exception:
+        return {}
+
+
+def update_paper_ledger(signals, prices, path=None):
+    """讀帳本 → 替還沒結束的紀錄對答案 → 記下今天的新訊號 → 存檔 → 回傳要放進日報的文字。
+    已結束或確定沒買到的紀錄不再更動；同一天重複執行不會重複記。"""
+    path = path or _ledger_path()
+    rows = load_ledger(path)
+    frames = {}
+
+    def frame_of(sym):
+        if sym not in frames:
+            df = prices.get(sym)
+            frames[sym] = _ledger_frame(df, mkt_of(sym) == "tw") if df is not None and len(df) else None
+        return frames[sym]
+
+    kept = defaultdict(list)                              # 每檔股票已經「紙上買過」的訊號日（進行中或已結束）
+    for r in rows:
+        if r["status"] in ("open", "closed"):
+            kept[r["sym"]].append(pd.Timestamp(r["date"]).normalize())
+    today = pd.Timestamp.now().normalize()
+    for r in sorted((r for r in rows if r["status"] in ("pending", "open")), key=lambda r: r["date"]):
+        sym, day = r["sym"], pd.Timestamp(r["date"]).normalize()
+        fr = frame_of(sym)
+        if fr is None:                                    # 這次沒有這檔的 K 線：先等；等太久就放棄，不讓它永遠掛著
+            started = pd.Timestamp(r["entry_date"]).normalize() if r["status"] == "open" and r["entry_date"] else day
+            if (today - started).days > (45 if r["status"] == "open" else 10):
+                if day in kept[sym]:
+                    kept[sym].remove(day)
+                r.update(status="skipped", note="no_data")
+            continue
+        was_pending = r["status"] == "pending"
+        res = ledger_eval(r, fr, mkt_of(sym) == "tw")
+        if not res:
+            continue
+        if res["status"] in ("open", "closed") and was_pending:
+            t = int(fr[0].get_indexer([day])[0])
+            pos = [int(p) for p in fr[0].get_indexer(kept[sym]) if p >= 0]
+            if any(0 <= t - p <= LEDGER_DEDUP_BARS for p in pos):
+                res = {"status": "skipped", "note": "dup", "entry_date": res["entry_date"]}
+            else:
+                kept[sym].append(day)
+        elif res["status"] == "skipped" and not was_pending and day in kept[sym]:
+            kept[sym].remove(day)                         # 資料事後被修正，原本進行中的那筆不成立了
+        r.update(res)
+
+    have = {(r["date"], r["sym"], r["kind"]) for r in rows}
+    n_new, not_final = 0, set()
+    for s in signals or []:
+        key = (_day(s["date"]), s["sym"], s["kind"])
+        if key in have or s["kind"] not in LEDGER_SEC:
+            continue
+        if not session_closed(s["date"], s["mkt"] == "tw"):
+            not_final.add(s["mkt"])                       # 盤中跑出來的訊號是用還沒走完的 K 棒算的，不記
+            continue
+        have.add(key)
+        n_new += 1
+        row = {c: "" for c in LEDGER_COLS}
+        row.update(date=key[0], mkt=s["mkt"], sym=s["sym"], name=s.get("name", ""), kind=s["kind"], mode=s["mode"],
+                   close=round(float(s["close"]), 4), pivot=round(float(s["pivot"]), 4),
+                   danger_low=round(float(s["danger_low"]), 4) if _num(s.get("danger_low")) else "",
+                   cap=s["cap"], rs=s.get("rs", ""), status="pending")
+        rows.append(row)
+    save_ledger(path, rows)
+    _git_stage(path)
+    return ledger_summary(rows, n_new, not_final)
 
 
 # ==========================================
@@ -1683,6 +1948,7 @@ def analyze_market(stock_dict, meta, tw_open, uni_info, tstats=None):
     grp_pass = {"tw": defaultdict(list), "us": defaultdict(list)}
     grp_nh = {"tw": defaultdict(int), "us": defaultdict(int)}
     pending = []     # 需要產業群資訊的卡片，掃完後再補
+    sig_meta, shown = {}, []     # 紙上帳本：每張卡片的樞紐／危險點（結構化資料），以及最後真的列出來的卡片
     near_miss = []   # 診斷用
     pe_ctx = {}      # 代號 → (第一個底部完成日, 當時股價, 現在股價, 起點是否確定, 最後一根 K 棒日期)
     pe_diag = {"tw": defaultdict(int), "us": defaultdict(int)}   # 算得出來 ok／缺 EPS no_eps／期間有分割 split／虧損 loss／可疑 odd
@@ -1762,6 +2028,12 @@ def analyze_market(stock_dict, meta, tw_open, uni_info, tstats=None):
 
             head = f"<b>{title}</b>｜現價 <b>{c_now:.2f}</b>｜RS <b>{rs}</b>"
 
+            def sig(pivot_, danger_, mode_):
+                """紙上帳本用。mode：open＝隔天開盤買；trigger＝隔天漲過樞紐才買。"""
+                return {"date": df.index[-1], "mkt": mkt, "sym": symbol, "name": name, "mode": mode_, "close": float(c_now),
+                        "pivot": float(pivot_), "danger_low": float(danger_) if danger_ else float("nan"),
+                        "cap": float(cap), "rs": int(rs)}
+
             # 出貨跡象（p.99-100、②p.242）
             diff40 = np.diff(c[-41:])
             big40 = v[-40:] > v50[-40:]
@@ -1830,6 +2102,9 @@ def analyze_market(stock_dict, meta, tw_open, uni_info, tstats=None):
                             f"  {risk_line(max(c_now, ch['pivot']), ch['pause_low'])}\n"
                             f"  {kind}｜杯 {ch['weeks']}週 深{ch['depth']:.0f}%・已收復{ch['recov']:.0f}%・停頓{ch['pause_days']}天 幅度{ch['pause_range']:.0f}%{extra}"
                         ), c_now)
+                        ch_mode = "trigger" if state.startswith("等突破") else ("open" if state.startswith("🚀") else None)
+                        if ch_mode:
+                            sig_meta[("cheat", symbol)] = sig(ch["pivot"], ch["pause_low"], ch_mode)
 
             # ---------- 第一層：p.106 趨勢樣板八項 ----------
             k = max(1, DAYS_ABOVE_LONG_MA)
@@ -1976,6 +2251,7 @@ def analyze_market(stock_dict, meta, tw_open, uni_info, tstats=None):
                         add("squat", card(f"🔄 <b>反轉回升：重新站上樞紐 {pv:.2f}</b> ({kk}天前突破)", fpb, pv, 15 + ft_score, True, note=note, entry=c_now))
                     else:
                         add("recent", card(f"✅ <b>{kk}天前突破 {pv:.2f}</b>，現高於樞紐 {dist:.1f}% (仍在買進區)", fpb, pv, 10 + ft_score, True, note=note, entry=c_now))
+                        sig_meta[("recent", symbol)] = sig(pv, fpb["danger_low"], "open")
                     placed = True
                 elif c_now > stop_b and c_now >= ma20[-1]:
                     add("squat", card(f"🔄 <b>蹲下 squat：跌回樞紐 {pv:.2f} 下方</b> ({kk}天前突破)｜守 20MA {ma20[-1]:.2f}", fpb, pv, 5 + ft_score, True, note=note))
@@ -2011,6 +2287,7 @@ def analyze_market(stock_dict, meta, tw_open, uni_info, tstats=None):
                         add("brk", card(
                             f"🚀 <b>突破樞紐 {pivot:.2f}</b> ({vol_label}{vol_ratio:.1f}倍)｜追價上限 {pivot * (1 + CHASE_LIMIT_PCT / 100):.2f}",
                             fp, pivot, 30, True, note=fail_note, entry=c_now))
+                        sig_meta[("brk", symbol)] = sig(pivot, fp["danger_low"], "open")
                     elif dist <= CHASE_LIMIT_PCT:
                         why = "量不足" if not vol_ok else ("突破前未量縮" if not fp["dryup"] else "收盤偏低")
                         add("star", card(f"⚠️ <b>越過樞紐 {pivot:.2f} 但{why}</b> ({vol_label}{vol_ratio:.1f}倍)", fp, pivot, 5, fp["dryup"],
@@ -2020,6 +2297,7 @@ def analyze_market(stock_dict, meta, tw_open, uni_info, tstats=None):
                     mark = "★◎" if fp["final"] <= 5.0 else "★"
                     add("star", card(f"🎯 <b>{mark} 樞紐 {pivot:.2f}</b> (差 {abs(dist):.1f}%)｜突破需量 ≥{BREAKOUT_VOL_MULT}倍", fp, pivot, 20, True,
                                      note=fail_note))
+                    sig_meta[("star", symbol)] = sig(pivot, fp["danger_low"], "trigger")
                     placed = True
 
             # ---------- 3C：位置較低的早期進場點 ----------
@@ -2168,6 +2446,7 @@ def analyze_market(stock_dict, meta, tw_open, uni_info, tstats=None):
             for s, sym, text, px in ranked[:lim]:
                 f = get_fundamentals(sym, px, tw_open.get(sym), deep=deep)
                 listed.add(sym)
+                shown.append((key, sym))
                 earn = ""
                 ed = f.get("earn_days")
                 if key != "pb" and ed is not None and 0 <= ed <= EARNINGS_WARN_DAYS:
@@ -2218,8 +2497,10 @@ def analyze_market(stock_dict, meta, tw_open, uni_info, tstats=None):
     dprint("🔎 本益比擴張（卡片中已完成過底部的）：" + "｜".join(
         f"{MARKET_CFG[k]['name']} 算得出={pe_diag[k]['ok']} 缺EPS={pe_diag[k]['no_eps']} 期間有分割={pe_diag[k]['split']}"
         f" 虧損={pe_diag[k]['loss']} 可疑={pe_diag[k]['odd']}" for k in ("us", "tw")))
-    global LAST_DIAG
+    global LAST_DIAG, LAST_SIGNALS, LAST_PRICES
     LAST_DIAG = diag
+    LAST_SIGNALS = [dict(sig_meta[k], kind=k[0]) for k in shown if k in sig_meta]
+    LAST_PRICES = raw_data
 
     # ---------- 表頭 ----------
     mk = []
@@ -2241,8 +2522,18 @@ def analyze_market(stock_dict, meta, tw_open, uni_info, tstats=None):
 
 if __name__ == "__main__":
     stock_dict, meta, uni_info = get_entire_market_universe()
+    if PAPER_LEDGER:
+        for sym, name in ledger_watch_symbols().items():
+            stock_dict.setdefault(sym, name)
     tw_open = fetch_tw_open_data()
     holdings_msg, header, sections = analyze_market(stock_dict, meta, tw_open, uni_info, load_trade_stats())
-    send_reports(holdings_msg, header, sections)
+    tail = []
+    if PAPER_LEDGER:
+        try:
+            tail.append(update_paper_ledger(LAST_SIGNALS, LAST_PRICES))
+        except Exception as e:                            # 帳本出問題不能擋住日報；檔案保持原樣，下次再試
+            print(f"紙上帳本更新失敗: {type(e).__name__}: {e}")
+            tail.append(f"📒 紙上帳本今天更新失敗（不影響日報，帳本檔案沒有被改動）：{html.escape(type(e).__name__)}")
+    send_reports(holdings_msg, header, sections, tail)
     if SEND_DIAGNOSTICS and LAST_DIAG:
         send_telegram_msg("🔧 診斷（調整期間用，整則轉貼或截圖給我即可）\n" + html.escape("\n".join(LAST_DIAG)))
