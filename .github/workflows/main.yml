@@ -2,12 +2,18 @@ name: Daily Stock Radar
 
 on:
   schedule:
-    # 台灣時間週一至週五下午 15:00 自動執行 (對應 UTC 時間 07:00)
-    - cron: '0 7 * * 1-5'
-  workflow_dispatch: # 允許手動按按鈕立刻測試
+    # 備援用。平常由 iPhone「捷徑」在台灣時間 15:00 準時觸發（走下面的 workflow_dispatch）。
+    # GitHub 自己的排程常常晚好幾個小時，所以它只在「12 小時內還沒跑過」時才真的執行（見步驟 1b）。
+    # 台灣時間週一至週五 15:30 (對應 UTC 時間 07:30)
+    - cron: '30 7 * * 1-5'
+  workflow_dispatch: # 允許手動按按鈕，或由 iPhone 捷徑觸發
 
 permissions:
   contents: write # 開放權限讓機器人自動打卡續命，防止 60 天休眠
+
+concurrency:
+  group: daily-stock-radar # 同一時間只跑一份，避免兩份同時跑、同時寫 last_run.txt
+  cancel-in-progress: false
 
 jobs:
   scan:
@@ -16,16 +22,34 @@ jobs:
       - name: 1. 下載專案程式碼
         uses: actions/checkout@v4
 
+      - name: 1b. 排程備援：12 小時內已經跑過就跳過
+        id: gate
+        run: |
+          skip=false
+          if [ "${{ github.event_name }}" = "schedule" ] && [ -s last_run.txt ]; then
+            last=$(date -u -d "$(cat last_run.txt)" +%s 2>/dev/null || echo 0)
+            now=$(date -u +%s)
+            age=$(( now - last ))
+            if [ "$last" -gt 0 ] && [ "$age" -ge 0 ] && [ "$age" -lt 43200 ]; then
+              skip=true
+              echo "上次執行在 $(( age / 60 )) 分鐘前，這次排程跳過。"
+            fi
+          fi
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+
       - name: 2. 安裝 Python 環境
+        if: steps.gate.outputs.skip != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: 3. 安裝最新套件
+        if: steps.gate.outputs.skip != 'true'
         run: |
           pip install -U yfinance pandas numpy requests lxml html5lib
 
       - name: 4. 執行《超級績效》日報與《小哥短線處置戰法》日報
+        if: steps.gate.outputs.skip != 'true'
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -33,6 +57,7 @@ jobs:
           python scanner.py
 
       - name: 5. 自動打卡防休眠 (解決 GitHub 60 天停用問題)
+        if: steps.gate.outputs.skip != 'true'
         run: |
           date > last_run.txt
           git config --local user.email "action@github.com"
