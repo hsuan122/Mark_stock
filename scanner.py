@@ -1,5 +1,5 @@
 """
-《超級績效》SEPA / VCP 選股雷達  v4.1 —— 依《超級績效》第 3~13 章與《超級績效 2》第 1~10 章校正，台股／美股分流
+《超級績效》SEPA / VCP 選股雷達  v4.2 —— 依《超級績效》第 3~13 章與《超級績效 2》第 1~10 章校正，台股／美股分流
 
 書中規則對照（頁碼為中譯本）：
   第 3 章  p.54   評等程序：先過趨勢樣板 → 再用盈餘/營收/利潤率/相對強度過濾 → 人工檢視
@@ -76,6 +76,8 @@ TRADES_FILE = os.environ.get("TRADES_FILE", "trades.csv")   # 已平倉交易紀
 TRADE_STATS_MIN_N = 20        # 自訂：累積到這個筆數，才用「平均獲利的一半」限制卡片停損上限（②p.86）
 PE_EXPANSION_WARN = 2.0       # ②p.233：本益比比第一個底部當時擴張一倍以上 → 已到上漲後段
 SEND_DIAGNOSTICS = True       # 調整期間多傳一則診斷訊息到 Telegram；穩定後改成 False
+SHOW_EMPTY_SECTIONS = True    # 沒有股票的類別也列出標題並寫「今天沒有」；看熟了改成 False，就只列有股票的類別
+SHOW_SECTION_HELP = True      # 每個類別標題下面加一句白話說明；看熟了改成 False
 
 # --- 市場別設定（台股／美股分開）---
 MARKET_CFG = {
@@ -1517,12 +1519,43 @@ def send_telegram_msg(message):
             print(f"❌ 網路連線錯誤：{e}")
 
 
+# 每個類別的白話說明（顯示在標題下面）。數字直接取用上面的設定值，設定改了這裡會跟著變。
+# 不要在說明裡用 < > & 這三個符號（Telegram 會當成格式標記）。
+SECTION_HELP = {
+    "一": f"書上的標準買點：今天收盤剛越過樞紐（最後一次收縮的高點），量是平常的 {BREAKOUT_VOL_MULT:g} 倍以上，離樞紐還不到 {CHASE_LIMIT_PCT:g}%。",
+    "二": f"也是買點：{POST_BREAKOUT_DAYS} 天內這樣突破過，現在還在樞紐上方 {CHASE_LIMIT_PCT:g}% 以內，沒有追太高。",
+    "三": f"快到買點：收縮完成、量也縮了，價格在樞紐下方 {STAR_MAX_DIST:g}% 以內。等它帶量突破，還不是買點。",
+    "四": f"突破後回頭：{POST_BREAKOUT_DAYS} 天內突破過又跌回樞紐下面（蹲下），或跌回後今天重新站上（反轉回升）。",
+    "五": "比較早的買點，位置低、風險也高：跌深後漲回一部分，在半山腰窄幅停頓。越過停頓區的高點才算。",
+    "六": "少見的型態：8 週內帶量漲超過一倍，之後窄幅整理幾週。",
+    "七": "少見的型態：新股掛牌後的第一個整理區。",
+    "八": "只是觀察名單：有在整理，但收縮還沒完成，或量還沒縮。",
+    "九": "只是觀察名單：財報好、今天帶量創 20 天新高，但還沒有樞紐可以當買點。",
+}
+EMPTY_SECTION_TEXT = "　— 今天沒有 —"
+
+
+def _section_key(title):
+    """從「🚀 <b>【一、今日帶量突破樞紐】</b>」取出「一」；認不出來就回傳空字串。"""
+    i = title.find("【")
+    j = title.find("、", i + 1)
+    return title[i + 1:j] if 0 <= i < j else ""
+
+
 def send_reports(holdings_msg, header, sections):
     blocks = []
     for title, items in sections:
+        if not items and not SHOW_EMPTY_SECTIONS:
+            continue
+        head = title
+        tip = SECTION_HELP.get(_section_key(title)) if SHOW_SECTION_HELP else None
+        if tip:
+            head += "\n💬 " + tip
         if items:
-            blocks.append(title)
+            blocks.append(head)
             blocks.extend(items)
+        else:
+            blocks.append(head + "\n" + EMPTY_SECTION_TEXT)                # 標題、說明、「今天沒有」放同一塊，換頁時不會被拆開
     if not blocks:
         send_telegram_msg(holdings_msg + header + "\n今天沒有符合條件的標的。")
         return
