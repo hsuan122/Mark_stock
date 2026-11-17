@@ -40,6 +40,18 @@
   另外單獨測一條：買進後 10 天內收盤跌破 20 日線就先走（②p.51-52 說這時成功率減半）。
   「順不順」：最近 10 筆已經結束的同類交易有一半以上賺錢＝順（②p.83、p.133-136 由小而大）。
 
+第 5 題：《笑傲股市》（O'Neil）的兩條規則（同樣在看結果之前就定好，不事後調整）：
+  A 大盤開關（第 9 章 p.243-244、p.257）：指數收盤跌超過 0.2%、成交量又比前一天大＝出貨日；
+    最近 25 個交易日內累積 5 個 → 「修正」，不買新股票；修正期間，從反彈第 4 天起出現
+    「收盤漲超過 1.5%、量比前一天大」的一天（漲勢確立日）→ 回到「上升」，出貨日重新計算。
+    美股看 S&P 500 與那斯達克（任一檔觸發就算，p.244），台股看加權指數。
+  B 賣出（第 11 章 p.303、p.316-318）：碰到 +20% 全部賣出；但進場後 15 個交易日內就到 +20% 的，
+    不賣、停損移到成本、至少抱到第 40 個交易日，之後收盤跌破 50 日線才賣；
+    一直沒結果的最多抱 65 個交易日（13 週）。起始停損不變。
+  書上沒有給死、自己定的數字：5 個、25 天、1.5%、八週後用 50 日線出場。
+  判定方式（也是事先定好）：A 只看「★ 掛單、抱 20 天」，修正期要明顯比上升期差，而且兩個市場方向一致；
+    B 只看「★ 掛單」，要明顯比第 4 題的出場方式好，而且兩個市場方向一致。「明顯」＝差距超過 2 倍標準誤。
+
 限制（解讀時要記得）：
   ・股票池是「現在」還上市、而且現在成交量夠大的股票 → 已下市的不在裡面，整體報酬會偏樂觀；
     但各組用的是同一批股票，組與組之間的比較仍有意義。
@@ -87,6 +99,23 @@ EPS_WORKERS = 4              # 同時抓幾檔（太多會被 Yahoo 擋）
 EPS_BUDGET_SEC = 1500        # 抓財報最多花多久；超過就用已經抓到的繼續
 FUND_CHECK_N = 30            # 基本面自我檢查抽幾檔
 EVENTS_FILE = "backtest_events.zip"       # 裡面是一個 CSV
+# ---- 第 5 題（《笑傲股市》；數字在看結果之前就定好）----
+REPORT = (os.environ.get("BT_REPORT") or "5").strip()        # 5＝回測 5（預設）；4＝重跑回測 4（會多抓美股財報）
+DIST_DROP_PCT = 0.2          # 出貨日：指數收盤跌「超過」這個幅度，而且量比前一天大（p.244）
+DIST_WINDOW = 25             # 看最近幾個交易日（書上是四到五週，p.243）
+DIST_COUNT = 5               # 累積幾個出貨日算「修正」（書上有 3~5、4~5、5~6 三種講法，p.235、p.243）
+FTD_MIN_DAY = 4              # 反彈第幾天起才算數（p.257）
+FTD_PCT = 1.5                # 漲勢確立日：收盤漲幅要「超過」這個數字（書上說只漲 1.5% 不夠果斷，p.257）
+FTD_PCT_ALT = 2.0            # 只當參考，不拿來判定
+INDEX_SYMS = {"us": ("^GSPC", "^IXIC"), "tw": ("^TWII",)}
+INDEX_TXT = {"us": "S&amp;P 500 與那斯達克，任一檔觸發就算", "tw": "加權指數"}
+TW_VOL_PROXY = "0050.TW"     # 加權指數的成交量缺太多時，用它的成交量代替
+VOL_OK_SHARE = 0.9           # 成交量至少要有這個比例的交易日有數字
+ON_TARGET_PCT = 20.0         # 漲到這裡全部賣出（p.303）
+ON_FAST_BARS = 15            # 進場後幾個交易日內就到價，算「三週內」（p.303）
+ON_HOLD_BARS = 40            # 那種情況至少抱八週（p.303、p.318）
+ON_SLOW_BARS = 65            # 一直沒結果：最多等 13 週（p.316）
+ON_MAX_HOLD = BOOK_MAX_HOLD  # 自訂：最久抱幾個交易日（與第 4 題相同）
 DEBUG = os.environ.get("BT_DEBUG", "") == "1"            # 測試用：遇到例外直接丟出，不吞掉
 
 NEUTRAL_FUND = {"line": "", "badges": [], "warn": [], "score": 0, "meets_min": None, "strong": False,
@@ -353,7 +382,7 @@ def regime_series(idx_close):
 # ==========================================
 # 3. 把一檔股票整理成「每一天當時看得到的數字」
 # ==========================================
-def prep(sym, df, rs_tab, indices, regimes):
+def prep(sym, df, rs_tab, indices, regimes, mstates=None):
     mkt = S.mkt_of(sym)
     is_tw = mkt == "tw"
     cfg = S.MARKET_CFG[mkt]
@@ -386,6 +415,10 @@ def prep(sym, df, rs_tab, indices, regimes):
         if np.isfinite(mm).all():
             m = mm
         reg = regimes[mkt].reindex(dates, method="ffill").fillna("unk").values
+    mst, mst2 = np.array(["unk"] * n, dtype=object), np.array(["unk"] * n, dtype=object)
+    if mstates and mkt in mstates:                        # 第 5 題：當天收盤後大盤是「上升」還是「修正」
+        mst = mstates[mkt][0].reindex(dates, method="ffill").fillna("unk").values
+        mst2 = mstates[mkt][1].reindex(dates, method="ffill").fillna("unk").values
 
     with np.errstate(divide='ignore', invalid='ignore'):
         liquid = (v50 >= S.MIN_VOL_MA50) & (to50 >= cfg["min_turnover"])
@@ -423,7 +456,7 @@ def prep(sym, df, rs_tab, indices, regimes):
     return dict(sym=sym, mkt=mkt, cfg=cfg, n=n, dates=df.index, rc=rc, v=v, v50=v50, o=o, h=h, l=l, c=c, warn=warn,
                 ma20=ma20, ma50=ma50, hma20=hma20, hma50=hma50, atr_pct=atr_pct, rs=rs, m=m, reg=reg, liquid=liquid, pinned=pinned,
                 template=template, long_ok=long_ok, vol_ratio=vol_ratio, is_red=is_red, locked=locked, vol_ok=vol_ok,
-                heavy_down=heavy_down, more_down=more_down, lim=lim)
+                heavy_down=heavy_down, more_down=more_down, lim=lim, mst=mst, mst2=mst2)
 
 
 def distribution_at(x, t):
@@ -542,7 +575,8 @@ def simulate(x, t, cap_pct, ref=None, danger_low=None, flat_stop=None, trigger=N
     out = {"skip": "", "stop_pct": np.nan, "ret20": np.nan, "raw20": np.nan, "stop20": np.nan, "r20": np.nan,
            "ret60": np.nan, "stop60": np.nan, "hit20": np.nan, "mfe60": np.nan, "idx20": np.nan, "gap_pct": np.nan,
            "amb": 0.0, "exit20": pd.NaT, "bk_ret": np.nan, "bk_r": np.nan, "bk_days": np.nan, "bk_half": np.nan,
-           "bk_open": np.nan, "bk_why": "", "bk2_ret": np.nan, "bk2_days": np.nan, "bk2_why": ""}
+           "bk_open": np.nan, "bk_why": "", "bk2_ret": np.nan, "bk2_days": np.nan, "bk2_why": "",
+           "days20": np.nan, "on_ret": np.nan, "on_days": np.nan, "on_why": "", "on_fast": np.nan, "on_open": np.nan}
     e = t + 1
     if e >= n:
         out["skip"] = "no_next_bar"
@@ -591,6 +625,7 @@ def simulate(x, t, cap_pct, ref=None, danger_low=None, flat_stop=None, trigger=N
             out["idx20"] = (x["m"][e + HOLD_A - 1] / x["m"][t] - 1) * 100.0   # 同期間大盤
     if np.isfinite(out["ret20"]):
         out["r20"] = out["ret20"] / pct
+        out["days20"] = float(k_stop + 1) if (k_stop is not None and k_stop < HOLD_A) else float(HOLD_A)
         if "dates" in x:                                     # 這筆「抱 20 天」的交易哪一天結束（判斷順不順時要用）
             out["exit20"] = x["dates"][e + (k_stop if (k_stop is not None and k_stop < HOLD_A) else HOLD_A - 1)]
         if "hma50" in x:
@@ -599,6 +634,8 @@ def simulate(x, t, cap_pct, ref=None, danger_low=None, flat_stop=None, trigger=N
                 out[pre + "_ret"], out[pre + "_days"], out[pre + "_why"] = b["ret"], b["days"], b["why"]
                 if not early:
                     out["bk_r"], out["bk_half"], out["bk_open"] = b["ret"] / pct, b["half"], b["open"]
+            q = oneil_exit(x, e, P, sp, cost)
+            out["on_ret"], out["on_days"], out["on_why"], out["on_fast"], out["on_open"] = q["ret"], q["days"], q["why"], q["fast"], q["open"]
     # 停損之前（停損當天不算）最高漲到哪裡
     kk = k_stop if k_stop is not None else min(HOLD_B, n - e)
     complete = k_stop is not None or (e + HOLD_B - 1 < n)
@@ -654,6 +691,167 @@ def book_exit(x, e, P, sp, cost, early20=False):
     r_rest = px / P - 1.0
     ret = (0.5 * r_half + 0.5 * r_rest if half else r_rest) * 100.0 - cost
     return {"ret": float(ret), "days": float(exit_i - e + 1), "half": 1.0 if half else 0.0, "open": is_open, "why": why}
+
+
+def oneil_exit(x, e, P, sp, cost):
+    """第 5 題規則 B（《笑傲股市》p.303、p.316-318）。e＝進場那根、P＝成交價、sp＝起始停損價。
+    ・碰到 +20% → 全部賣出（開盤就跳過目標價，以開盤價計）。
+    ・進場後 ON_FAST_BARS 根內就碰到 +20% → 不賣；下一根起停損移到成本；至少抱到第 ON_HOLD_BARS 根，
+      之後收盤跌破 50 日線 → 隔天開盤賣。
+    ・一直沒碰到停損也沒到 +20% → 第 ON_SLOW_BARS 根收盤賣。
+    同一根 K 棒同時碰到停損與目標價，一律算停損先到。回傳 ret（%，已扣成本）、days、fast、open、why。"""
+    o, h, l, c, n = x["o"], x["h"], x["l"], x["c"], x["n"]
+    ma50 = x["hma50"]
+    tgt = P * (1 + ON_TARGET_PCT / 100.0)
+    stop, fast, to_be = sp, False, False
+    px, why, exit_i, pending = None, "", -1, False
+    last = min(n, e + ON_MAX_HOLD)
+    for k in range(e, last):
+        if to_be:
+            stop, to_be = max(stop, P), False                # 前一根已經到過 +20% → 今天起停損在成本價
+        if l[k] <= stop:
+            px, exit_i = (stop if k == e else min(float(o[k]), stop)), k
+            why = "stop" if stop < P else "breakeven"
+            break
+        if not fast and h[k] >= tgt:
+            if (k - e) < ON_FAST_BARS:
+                fast, to_be = True, True                     # 三週內就到價：不賣，改成至少抱八週
+            else:
+                px, exit_i, why = max(float(o[k]), tgt), k, "target"
+                break
+        if fast:
+            if (k - e + 1) >= ON_HOLD_BARS and np.isfinite(ma50[k]) and c[k] < ma50[k]:
+                if k + 1 >= n:
+                    pending, exit_i = True, k                # 賣出訊號出現在資料最後一根 → 還沒真的賣
+                else:
+                    px, exit_i, why = float(o[k + 1]), k + 1, "ma50"
+                break
+        elif (k - e + 1) >= ON_SLOW_BARS:
+            px, exit_i, why = float(c[k]), k, "time"
+            break
+    is_open = 0.0
+    if px is None:
+        if not pending and last == e + ON_MAX_HOLD:
+            exit_i, why = last - 1, "time"
+        else:
+            exit_i, why, is_open = (exit_i if pending else n - 1), "open", 1.0
+        px = float(c[exit_i])
+    ret = (px / P - 1.0) * 100.0 - cost
+    return {"ret": float(ret), "days": float(exit_i - e + 1), "fast": 1.0 if fast else 0.0, "open": is_open, "why": why}
+
+
+# ==========================================
+# 5b. 第 5 題規則 A：大盤開關（出貨日 → 修正；漲勢確立日 → 上升）
+# ==========================================
+def _clean_index(d):
+    if d is None or len(d) == 0 or not {"Close", "Low", "Volume"} <= set(d.columns):
+        return None
+    d = d[["Close", "Low", "Volume"]].copy()
+    if getattr(d.index, "tz", None) is not None:
+        d.index = d.index.tz_localize(None)
+    d.index = d.index.normalize()
+    d = d[~d.index.duplicated(keep="last")].dropna(subset=["Close", "Low"]).sort_index()
+    return d if len(d) >= 210 else None
+
+
+def _vol_share(d):
+    v = d["Volume"].values.astype(float)
+    return float((np.isfinite(v) & (v > 0)).mean()) if len(v) else 0.0
+
+
+def fetch_index_ohlcv(start_date, raw=None):
+    """主要指數每天的收盤、最低、成交量。加權指數的成交量缺太多時，改用 0050 的成交量代替。
+    回傳 ({市場: [每檔指數一個 DataFrame]}, 給報告看的備註)。"""
+    out, notes = {}, []
+    for mkt, syms in INDEX_SYMS.items():
+        frames = []
+        for sym in syms:
+            try:
+                d = _clean_index(S.yf.Ticker(sym).history(start=start_date, auto_adjust=False))
+            except Exception as e:
+                print(f"⚠️ 指數 {sym} 抓取失敗: {e}")
+                d = None
+            if d is None:
+                notes.append(f"{sym} 抓不到資料")
+                continue
+            share = _vol_share(d)
+            if share < VOL_OK_SHARE and mkt == "tw":
+                pv = None
+                try:
+                    src = raw[TW_VOL_PROXY] if (raw is not None and TW_VOL_PROXY in raw) else S.yf.Ticker(TW_VOL_PROXY).history(start=start_date, auto_adjust=False)
+                    pv = src["Volume"].copy()
+                    if getattr(pv.index, "tz", None) is not None:
+                        pv.index = pv.index.tz_localize(None)
+                    pv.index = pv.index.normalize()
+                    pv = pv[~pv.index.duplicated(keep="last")]
+                except Exception as e:
+                    print(f"⚠️ {TW_VOL_PROXY} 的成交量抓取失敗: {e}")
+                if pv is not None and len(pv):
+                    d["Volume"] = pv.reindex(d.index).values
+                    notes.append(f"{sym} 的成交量只有 {share * 100:.0f}% 的日子有數字，改用 {TW_VOL_PROXY} 的成交量（現在有 {_vol_share(d) * 100:.0f}%）")
+            d["Volume"] = d["Volume"].astype(float)
+            d.loc[~(d["Volume"] > 0), "Volume"] = np.nan
+            if _vol_share(d) < VOL_OK_SHARE:
+                notes.append(f"{sym} 的成交量資料不足（只有 {_vol_share(d) * 100:.0f}% 的日子有數字），這個市場的 A 參考就好")
+            frames.append(d)
+        if frames:
+            out[mkt] = frames
+    return out, "；".join(notes)
+
+
+def market_states(frames, ftd_pct=FTD_PCT):
+    """規則 A。frames：同一個市場的一檔或多檔指數（收盤、最低、成交量）。
+    回傳每個交易日「收盤後」的狀態（up＝上升、corr＝修正）；第 i 天的狀態只用到第 i 天（含）以前的資料。
+    ・出貨日：收盤比前一天跌超過 DIST_DROP_PCT%，而且成交量大於前一天。
+    ・上升 → 修正：任一檔指數在最近 DIST_WINDOW 個交易日內（且在上一次漲勢確立日之後）累積 DIST_COUNT 個出貨日。
+    ・修正 → 上升：某一檔指數在修正期間的最低點之後第一次收高算第 1 天（盤中再破低就重算）；
+      第 FTD_MIN_DAY 天起，出現收盤漲超過 ftd_pct%、量大於前一天的一天。"""
+    if not frames:
+        return pd.Series(dtype=object)
+    idx = frames[0].index
+    for f in frames[1:]:
+        idx = idx.union(f.index)
+    idx = idx.sort_values()
+    n, K = len(idx), len(frames)
+    C, Lo, V = (np.full((K, n), np.nan) for _ in range(3))
+    for j, f in enumerate(frames):
+        g = f.reindex(idx)
+        C[j], Lo[j], V[j] = g["Close"].values.astype(float), g["Low"].values.astype(float), g["Volume"].values.astype(float)
+    nan1 = np.full((K, 1), np.nan)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        chg = (C / np.c_[nan1, C[:, :-1]] - 1) * 100.0
+        vol_up = V > np.c_[nan1, V[:, :-1]]                    # 任一邊沒有數字 → False
+        dist = (chg < -DIST_DROP_PCT) & vol_up
+        ftd_ok = (chg > ftd_pct) & vol_up
+        up_day = chg > 0
+    csum = np.cumsum(dist, axis=1)
+    state = np.empty(n, dtype=object)
+    cur, start = "up", 0
+    bottom, day1 = np.full(K, np.inf), [None] * K
+    for i in range(n):
+        if cur == "up":
+            a = max(start, i - DIST_WINDOW + 1)
+            cnt = csum[:, i] - (csum[:, a - 1] if a > 0 else 0)
+            if (cnt >= DIST_COUNT).any():
+                cur = "corr"
+                for j in range(K):
+                    bottom[j], day1[j] = (Lo[j, i] if np.isfinite(Lo[j, i]) else np.inf), None
+        else:
+            confirmed = False
+            for j in range(K):
+                if not np.isfinite(C[j, i]):
+                    continue
+                if np.isfinite(Lo[j, i]) and Lo[j, i] < bottom[j]:
+                    bottom[j], day1[j] = Lo[j, i], None        # 盤中再破低 → 反彈重新算
+                if day1[j] is None:
+                    if up_day[j, i]:
+                        day1[j] = i
+                elif (i - day1[j] + 1) >= FTD_MIN_DAY and ftd_ok[j, i]:
+                    confirmed = True
+            if confirmed:
+                cur, start = "up", i + 1
+        state[i] = cur
+    return pd.Series(state, index=idx)
 
 
 # ==========================================
@@ -728,7 +926,8 @@ def replay_stock(x, events, baseline):
             scale = x["rc"][t] / c[t]                    # 連續化價格 → 當時線圖上的價格
             row = {"date": x["dates"][t], "sym": sym, "mkt": mkt, "t": t, "stream": stream, "stage": stage,
                    "tmpl": tmpl, "dist": bool(dist[0]), "d_heavy": dist[1][0], "d_more": dist[1][1], "d_s3": dist[1][2],
-                   "rs": float(x["rs"][t]), "reg": x["reg"][t], "vol_ratio": float(x["vol_ratio"][t]),
+                   "rs": float(x["rs"][t]), "reg": x["reg"][t], "mst": x["mst"][t], "mst2": x["mst2"][t],
+                   "vol_ratio": float(x["vol_ratio"][t]),
                    "is_red": bool(x["is_red"][t]), "locked": bool(x["locked"][t]),
                    "close": float(x["rc"][t]), "ref": float(ref * scale), "over_pct": float((c[t] / ref - 1) * 100.0)}
             row.update(simulate(x, t, stop_cap(x["reg"][t]), ref=ref, danger_low=danger_low, trigger=trigger))
@@ -759,6 +958,7 @@ def replay_stock(x, events, baseline):
                 r = simulate(x, t, 0.0, flat_stop=stop_cap(x["reg"][t]))
                 if not r["skip"]:
                     baseline.append({"mkt": mkt, "sym": sym, "t": t, "date": x["dates"][t], "reg": x["reg"][t],
+                                     "mst": x["mst"][t], "mst2": x["mst2"][t],
                                      "close": float(x["rc"][t]), **r})
             # ---- 名單：樞紐已成型、收盤在樞紐下方 6% 內、守住 20 日線、近 10 日沒有還在進行中的突破 ----
             fp0 = base(t)
@@ -818,7 +1018,7 @@ def replay_stock(x, events, baseline):
                     events.append(row)
 
 
-def replay_all(raw, indices):
+def replay_all(raw, indices, mstates=None):
     rs_tab = rs_tables(raw)
     regimes = {mkt: regime_series(s) for mkt, s in indices.items()}
     events, baseline, errors, used = [], [], 0, defaultdict(int)
@@ -827,7 +1027,7 @@ def replay_all(raw, indices):
         try:
             if len(df) <= MIN_HISTORY + 1:
                 continue
-            x = prep(sym, df, rs_tab, indices, regimes)
+            x = prep(sym, df, rs_tab, indices, regimes, mstates)
             if x["warn"]:
                 used["warn_" + x["mkt"]] += 1            # 還原資料異常的股票不納入
                 continue
@@ -1385,6 +1585,142 @@ def build_report4(ev, base, info):
     return "\n".join(L)
 
 
+ON_WHY = (("stop", "碰到起始停損"), ("target", f"漲 {ON_TARGET_PCT:.0f}% 賣出"), ("breakeven", "三週內到價、後來跌回成本"),
+          ("ma50", "三週內到價、八週後跌破 50 日線"), ("time", "時間到"), ("open", "到今天還抱著"))
+MST_TXT = {"up": "上升", "corr": "修正", "unk": "未知"}
+
+
+def _cmp(a, b, col):
+    """兩組（互相獨立）平均報酬的差。回傳 (差距, 分類)：1＝a 明顯較好、-1＝明顯較差、0＝分不出來；樣本太少回傳 None。"""
+    xa = a[col].values.astype(float) if len(a) and col in a else np.array([])
+    xb = b[col].values.astype(float) if len(b) and col in b else np.array([])
+    xa, xb = xa[np.isfinite(xa)], xb[np.isfinite(xb)]
+    if len(xa) < MIN_N or len(xb) < MIN_N:
+        return None
+    diff = xa.mean() - xb.mean()
+    se = float(np.sqrt(xa.var(ddof=1) / len(xa) + xb.var(ddof=1) / len(xb)))
+    return float(diff), (1 if diff > 2 * se else (-1 if diff < -2 * se else 0))
+
+
+def _cmp_paired(df, a, b):
+    """同一批交易、兩種出場方式逐筆相減。回傳值的意義同 _cmp。"""
+    if df.empty or a not in df or b not in df:
+        return None
+    d = (df[a] - df[b]).values.astype(float)
+    d = d[np.isfinite(d)]
+    if len(d) < MIN_N:
+        return None
+    diff, se = d.mean(), d.std(ddof=1) / np.sqrt(len(d))
+    return float(diff), (1 if diff > 2 * se else (-1 if diff < -2 * se else 0))
+
+
+def judge(res):
+    """事先定好的過關條件：至少一個市場「明顯較好」，而且樣本足夠的市場方向都一致。res＝{市場: _cmp 的結果}。
+    回傳 (文字, True/False/None)。"""
+    ok = {m: r for m, r in res.items() if r is not None}
+    if not ok:
+        return "樣本太少，無法判定", None
+    passed = any(c == 1 for _, c in ok.values()) and all(d > 0 for d, _ in ok.values())
+    note = "" if len(ok) == len(res) else "（" + "、".join(S.MARKET_CFG[m]["name"] for m in res if m not in ok) + "樣本太少，只看另一個市場）"
+    return ("過關" if passed else "沒過關") + note, passed
+
+
+def per_day(df, ret, days):
+    """每抱一個交易日平均賺多少（總報酬 ÷ 總天數）：出場方式抱的時間不一樣長時，用這個比較公平。"""
+    if df.empty or ret not in df or days not in df:
+        return "—"
+    d = df[np.isfinite(df[ret]) & np.isfinite(df[days])]
+    tot = float(d[days].sum()) if len(d) else 0.0
+    return f"{d[ret].sum() / tot:+.2f}%" if tot > 0 else "—"
+
+
+def build_report5(ev, base, info):
+    """第 5 題：《笑傲股市》的大盤開關（A）與賣出規則（B）。"""
+    mk = lambda df, m: df[df["mkt"] == m] if len(df) else df
+    fin = lambda df: df[np.isfinite(df["ret20"])] if len(df) and "ret20" in df else df.iloc[0:0]
+    st = lambda df, m, s_, col="mst": df[(df["mkt"] == m) & (df[col] == s_)] if len(df) and col in df else df.iloc[0:0]
+    g = groups(ev)
+    Sg, A, F = fin(g["S"]), fin(g["A"]), fin(base)
+    names = {m: S.MARKET_CFG[m]["name"] for m in ("us", "tw")}
+    L = []
+    L.append("🧪 <b>【回測 5：《笑傲股市》的兩條規則】</b>")
+    L.append(f"期間 {info['d0']} ~ {info['d1']}｜台股 {info.get('tw', 0)} 檔、美股 {info.get('us', 0)} 檔")
+    L.append("兩條規則和過關條件都是跑之前就定好的，不看結果調整。")
+    L.append("")
+    resA = {m: _cmp(st(Sg, m, "up"), st(Sg, m, "corr"), "ret20") for m in ("us", "tw")}
+    resB = {m: _cmp_paired(mk(Sg, m), "on_ret", "bk_ret") for m in ("us", "tw")}
+    L.append("<b>先看結論</b>（機械判讀，只比平均每筆報酬）")
+    L.append(f"<b>A 大盤開關：{judge(resA)[0]}</b>")
+    for m in ("us", "tw"):
+        L.append(f"・{names[m]}｜★ 掛單、抱 {HOLD_A} 天：上升期 對比 修正期：{verdict(st(Sg, m, 'up'), st(Sg, m, 'corr'))}")
+    L.append("　過關條件：上升期的訊號明顯比修正期好，而且兩個市場方向一致。")
+    L.append(f"<b>B 漲 {ON_TARGET_PCT:.0f}% 就賣：{judge(resB)[0]}</b>")
+    for m in ("us", "tw"):
+        L.append(f"・{names[m]}｜★ 掛單：漲 {ON_TARGET_PCT:.0f}% 就賣 對比 回測 4 的出場：{verdict_paired(mk(Sg, m), 'on_ret', 'bk_ret')}")
+    L.append("　過關條件：明顯比回測 4 的出場好，而且兩個市場方向一致。")
+    L.append("")
+    # ---------- A ----------
+    L.append("<b>A 的細節</b>")
+    L.append(f"規則：指數收盤跌超過 {DIST_DROP_PCT:g}%、量比前一天大＝出貨日；最近 {DIST_WINDOW} 個交易日內滿 {DIST_COUNT} 個 → 修正（不買新股票）。"
+             f"修正期間，反彈第 {FTD_MIN_DAY} 天起出現「漲超過 {FTD_PCT:g}%、量比前一天大」的一天 → 回到上升。")
+    ms = info.get("mst") or {}
+    d0, d1 = pd.to_datetime(info["d0"], errors="coerce"), pd.to_datetime(info["d1"], errors="coerce")
+    for m in ("us", "tw"):
+        ser = ms[m][0] if m in ms else None
+        if ser is not None and pd.notna(d0) and pd.notna(d1):
+            ser = ser[(ser.index >= d0) & (ser.index <= d1)]
+        if ser is None or len(ser) == 0:
+            L.append(f"・{names[m]}：抓不到指數資料，這個市場沒辦法判斷")
+            continue
+        corr = (ser == "corr").values
+        n_in = int((corr & ~np.r_[False, corr[:-1]]).sum())
+        L.append(f"・{names[m]}（{INDEX_TXT[m]}）：期間內進入修正 {n_in} 次、合計 {int(corr.sum())} 個交易日（占 {corr.mean() * 100:.0f}%）；"
+                 f"最後一天是「{MST_TXT.get(ser.iloc[-1], '未知')}」")
+    if info.get("idx_note"):
+        L.append("・資料備註：" + html.escape(info["idx_note"]))
+    L.append("<i>每行：筆數｜平均每筆 ±誤差｜勝率｜賺的平均｜賠的平均</i>")
+    for title, df, col in ((f"① ★ 掛單、抱 {HOLD_A} 天（判定用）", Sg, "ret20"), ("② ★ 掛單、回測 4 的出場", Sg, "bk_ret"),
+                           (f"③ 有效突破、隔天開盤買、抱 {HOLD_A} 天", A, "ret20"),
+                           (f"④ 對照組：任何一天買進過樣板的股票、抱 {HOLD_A} 天", F, "ret20")):
+        L.append(f"<b>{title}</b>")
+        for m in ("us", "tw"):
+            for s_, nm in (("up", "上升期"), ("corr", "修正期")):
+                L.append(f" {names[m][0]}｜{nm}　{stat_line_wl(st(df, m, s_), col, None)}")
+    for m in ("us", "tw"):
+        n_all, n_c = len(mk(Sg, m)), len(st(Sg, m, "corr"))
+        if n_all:
+            L.append(f"照 A 做，{names[m]}的 ★ 掛單會少買 {n_c} 筆（占 {n_c / n_all * 100:.0f}%）")
+    L.append(f"參考（不拿來判定）：門檻從 {FTD_PCT:g}% 改成 {FTD_PCT_ALT:g}%")
+    for m in ("us", "tw"):
+        L.append(f"・{names[m]}｜★ 掛單、抱 {HOLD_A} 天：上升期 對比 修正期：{verdict(st(Sg, m, 'up', 'mst2'), st(Sg, m, 'corr', 'mst2'))}")
+    L.append("")
+    # ---------- B ----------
+    L.append("<b>B 的細節</b>")
+    L.append(f"規則：碰到 +{ON_TARGET_PCT:.0f}% 全部賣出；進場後 {ON_FAST_BARS} 個交易日內就到價的不賣，停損移到成本、至少抱到第 {ON_HOLD_BARS} 天，"
+             f"之後收盤跌破 50 日線才賣；一直沒結果最多抱 {ON_SLOW_BARS} 天。起始停損不變。")
+    L.append("<i>每行：筆數｜平均每筆 ±誤差｜勝率｜賺的平均｜賠的平均｜平均抱幾天</i>")
+    for title, df in (("① ★ 掛單（判定用）", Sg), ("② 有效突破、隔天開盤買", A), ("③ 對照組：任何一天買進過樣板的股票", F)):
+        L.append(f"<b>{title}</b>")
+        for m in ("us", "tw"):
+            sub, nm = mk(df, m), names[m][0]
+            L.append(f" {nm}｜漲 {ON_TARGET_PCT:.0f}% 就賣　{stat_line_wl(sub, 'on_ret', 'on_days')}")
+            L.append(f" {nm}｜回測 4 的出場　{stat_line_wl(sub, 'bk_ret', 'bk_days')}")
+            L.append(f" {nm}｜抱 {HOLD_A} 天　　{stat_line_wl(sub, 'ret20', 'days20')}")
+            L.append(f" {nm}｜每抱一天平均賺：漲 {ON_TARGET_PCT:.0f}% 就賣 {per_day(sub, 'on_ret', 'on_days')}、回測 4 {per_day(sub, 'bk_ret', 'bk_days')}、"
+                     f"抱 {HOLD_A} 天 {per_day(sub, 'ret20', 'days20')}")
+    d = Sg[np.isfinite(Sg["on_ret"])] if len(Sg) and "on_ret" in Sg else Sg.iloc[0:0]
+    if len(d):
+        vc = d["on_why"].value_counts()
+        L.append("★ 掛單用 B 最後怎麼出場（台美合計）：" + "｜".join(f"{name} {vc.get(k, 0) / len(d) * 100:.0f}%" for k, name in ON_WHY)
+                 + f"；三週內就到 +{ON_TARGET_PCT:.0f}% 的占 {d['on_fast'].mean() * 100:.0f}%")
+    L.append("")
+    L.append(info.get("check", ""))
+    L.append(f"<i>事件共 {len(ev)} 筆、對照組取樣 {len(base)} 筆；總耗時 {info.get('secs', 0):.0f} 秒。"
+             "限制：只含現在還上市、成交量夠大的股票；同一根 K 棒同時碰到停損與目標時算停損；"
+             "出貨日只算「下跌」的那一種，書上「量大不漲」的停滯日沒有給數字、不算；過去不代表未來。本報告不構成投資建議。</i>")
+    return "\n".join(L)
+
+
 def send_file(path, caption):
     url = f"https://api.telegram.org/bot{S.TELEGRAM_TOKEN}/sendDocument"
     try:
@@ -1425,37 +1761,49 @@ def main():
     symbols = list(stock_dict.keys())
     start_date = (pd.Timestamp.now() - pd.DateOffset(months=BT_MONTHS)).strftime('%Y-%m-%d')
     print(f"📥 下載 {len(symbols)} 檔、{BT_MONTHS} 個月的 K 線…")
-    S.send_telegram_msg(f"🧪 回測開始：下載 {len(symbols)} 檔股票 {BT_MONTHS} 個月的 K 線，這次還要逐檔抓美股的歷次財報，"
-                        f"會比前兩次久（估 15~40 分鐘），跑完會再傳結果。")
+    if REPORT == "5":
+        S.send_telegram_msg(f"🧪 回測 5 開始：下載 {len(symbols)} 檔股票 {BT_MONTHS} 個月的 K 線。這次不用抓財報（估 10~30 分鐘），跑完會再傳結果。")
+    else:
+        S.send_telegram_msg(f"🧪 回測開始：下載 {len(symbols)} 檔股票 {BT_MONTHS} 個月的 K 線，這次還要逐檔抓美股的歷次財報，"
+                            f"會比前兩次久（估 15~40 分鐘），跑完會再傳結果。")
     raw, splits = download_prices(symbols, start_date)
     if len(raw) < 50:
         raise RuntimeError(f"只下載到 {len(raw)} 檔股票的資料，無法回測（可能是 Yahoo 暫時擋住，請稍後再執行一次）")
     indices = S.fetch_indices(start_date)
+    mstates, idx_note = {}, ""
+    if REPORT == "5":
+        frames, idx_note = fetch_index_ohlcv(start_date, raw)
+        for mkt, fr in frames.items():
+            mstates[mkt] = (market_states(fr), market_states(fr, FTD_PCT_ALT))
     print(f"🔁 重放 {len(raw)} 檔…")
-    ev, base, used = replay_all(raw, indices)
+    ev, base, used = replay_all(raw, indices, mstates)
     info = dict(used)
+    info["mst"], info["idx_note"] = mstates, idx_note
     info["us_source"] = uni_info.get("us_source", "")
     dts = pd.to_datetime(pd.concat([ev["date"] if len(ev) else pd.Series(dtype="datetime64[ns]"),
                                     base["date"] if len(base) else pd.Series(dtype="datetime64[ns]")]))
     info["d0"] = dts.min().strftime("%Y-%m-%d") if len(dts) else "?"
     info["d1"] = dts.max().strftime("%Y-%m-%d") if len(dts) else "?"
-    us_syms = sorted(x for x in raw if S.mkt_of(x) == "us")
-    print(f"📑 抓 {len(us_syms)} 檔美股的歷次財報…")
-    hists, eps_stat = fetch_eps(us_syms)
-    eps_data, split_stat = {}, defaultdict(int)
-    for sym, h in hists.items():
-        h2, unk, st = adjust_for_splits(h, splits.get(sym))
-        eps_data[sym] = (h2, unk, bool(st["raw"] or st["amb"]))
-        for k, v in st.items():
-            split_stat[k] += v
-    ev, base = add_fundamentals(ev, eps_data), add_fundamentals(base, eps_data)
-    info["eps"] = {**eps_stat, "n": len(eps_data)}
-    info["split"] = dict(split_stat)
+    eps_data, info["eps"], info["split"], info["fcheck"] = {}, {}, {}, ""
+    if REPORT != "5":                                    # 回測 5 用不到財報，省下逐檔抓的時間
+        us_syms = sorted(x for x in raw if S.mkt_of(x) == "us")
+        print(f"📑 抓 {len(us_syms)} 檔美股的歷次財報…")
+        hists, eps_stat = fetch_eps(us_syms)
+        split_stat = defaultdict(int)
+        for sym, h in hists.items():
+            h2, unk, st = adjust_for_splits(h, splits.get(sym))
+            eps_data[sym] = (h2, unk, bool(st["raw"] or st["amb"]))
+            for k, v in st.items():
+                split_stat[k] += v
+        ev, base = add_fundamentals(ev, eps_data), add_fundamentals(base, eps_data)
+        info["eps"] = {**eps_stat, "n": len(eps_data)}
+        info["split"] = dict(split_stat)
     print("🔧 自我檢查…")
     info["check"] = self_check(raw, indices, stock_dict, meta, uni_info)
-    info["fcheck"] = fund_self_check(raw, eps_data)
+    if REPORT != "5":
+        info["fcheck"] = fund_self_check(raw, eps_data)
     info["secs"] = time.time() - t0
-    report = build_report4(ev, base, info)
+    report = build_report5(ev, base, info) if REPORT == "5" else build_report4(ev, base, info)
     print(re.sub(r"<[^>]+>", "", report))
     S.send_telegram_msg(report)
     if save_events(ev, base):
