@@ -1,0 +1,9 @@
+date,mkt,sym,name,kind,mode,close,pivot,danger_low,cap,rs,status,entry_date,entry,stop,exit_date,exit,ret,days,note
+2026-11-16,us,EQH,EQH,star,trigger,55.28,56.83,53.17,8.0,80,pending,,,,,,,,
+2026-11-16,us,INTA,INTA,star,trigger,45.98,46.5,42.63,8.0,94,pending,,,,,,,,
+2026-11-16,us,EBAY,EBAY,star,trigger,120.89,127.74,119.37,8.0,85,pending,,,,,,,,
+2026-11-17,tw,5904.TWO,寶雅,cheat,trigger,74.8,77.8,70.4,6.0,91,pending,,,,,,,,
+2026-11-17,tw,3004.TW,豐達科,cheat,trigger,129.0,129.0,119.0,6.0,78,pending,,,,,,,,
+2026-11-16,us,VAC,VAC,cheat,trigger,117.41,120.45,111.5,8.0,96,pending,,,,,,,,
+2026-11-16,us,LION,LION,cheat,trigger,14.04,14.52,13.66,8.0,92,pending,,,,,,,,
+2026-11-16,us,GME,GME,cheat,trigger,25.6,26.47,23.85,8.0,84,pending,,,,,,,,
