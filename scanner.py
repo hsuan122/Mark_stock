@@ -55,8 +55,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "請換成你的_CHAT_ID")
 #    註：第二本 p.79 不贊成用波動度決定停損幅度；想照書做，就在 "stop" 直接填你自己的停損價。
 #    賣出後把這一行刪掉，並在 trades.csv 加一行（程式會用它算勝率、平均獲利、平均虧損）。
 MY_HOLDINGS = {
-    "FMX": {"cost": 133.48, "date": "2026-11-11"},
-    "TEVA": {"cost": 44.21, "date": "2026-11-12"},
+    "NVDA": {"cost": 153.77, "date": "2026-11-17"},
 }
 
 # --- 風險（第一本第 12、13 章；第二本第 2、3、8、9 章。標「②」的頁碼是第二本）---
@@ -100,8 +99,8 @@ MARKET_CFG = {
         "min_turnover": 3_000_000,    # 自訂：50 日均成交值下限 (美元)
         "limit_pct": None,
         "gap_risk_pct": 0.0,
-        "cost_buy_pct": 0.0,
-        "cost_sell_pct": 0.0,
+        "cost_buy_pct": 0.1,          # 凱基複委託：成交金額的 0.1%，沒有最低收費（營業員 2026-11 的說明）
+        "cost_sell_pct": 0.1,         # 同上。台幣交割的換匯價差沒有算進去
     },
 }
 MIN_VOL_MA50 = 150_000
