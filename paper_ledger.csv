@@ -13,9 +13,9 @@ date,mkt,sym,name,kind,mode,close,pivot,danger_low,cap,rs,status,entry_date,entr
 2026-11-17,us,ADP,ADP,star,trigger,308.29,310.98,295.43,6.0,85,skipped,2026-11-18,,,,,,,no_trigger
 2026-11-18,tw,6579.TW,研揚,cheat,open,141.5,139.0,128.5,6.0,71,closed,2026-11-19,141.5,133.01,2026-11-19,133.01,-6.585,1,stop
 2026-11-18,tw,3004.TW,豐達科,cheat,trigger,129.5,130.5,119.0,6.0,78,skipped,2026-11-19,,,,,,,no_trigger
-2026-11-17,us,LUV,LUV,cheat,trigger,45.59,47.01,43.43,6.0,74,open,2026-11-18,47.057,44.2336,,,0.0276,1,
+2026-11-17,us,LUV,LUV,cheat,trigger,45.59,47.01,43.43,6.0,74,open,2026-11-18,47.057,44.2336,,,-0.1724,1,
 2026-11-17,us,HPQ,HPQ,cheat,trigger,28.71,29.78,27.7,6.0,85,skipped,2026-11-18,,,,,,,no_trigger
-2026-11-17,us,PENN,PENN,cheat,trigger,18.13,18.72,17.23,6.0,73,open,2026-11-18,18.7387,17.6144,,,-0.3134,1,
+2026-11-17,us,PENN,PENN,cheat,trigger,18.13,18.72,17.23,6.0,73,open,2026-11-18,18.7387,17.6144,,,-0.5134,1,
 2026-11-18,us,CODI,CODI,brk,open,12.62,12.49,11.27,6.0,93,pending,,,,,,,,
 2026-11-18,us,CART,CART,star,trigger,58.66,59.76,57.63,6.0,91,pending,,,,,,,,
 2026-11-18,us,INTA,INTA,star,trigger,44.26,46.5,42.63,6.0,93,pending,,,,,,,,
