@@ -39,3 +39,4 @@ date,mkt,sym,name,kind,mode,close,pivot,danger_low,cap,rs,status,entry_date,entr
 2026-11-25,us,INSW,INSW,cheat,trigger,102.39,106.64,96.03,6.0,95,pending,,,,,,,,
 2026-11-25,us,WKC,WKC,cheat,trigger,35.94,36.81,34.62,6.0,87,pending,,,,,,,,
 2026-11-25,us,FRO,FRO,cheat,trigger,47.65,48.12,43.61,6.0,95,pending,,,,,,,,
+2026-11-25,us,MSGE,MSGE,cheat,trigger,83.3,84.01,77.75,6.0,86,pending,,,,,,,,
